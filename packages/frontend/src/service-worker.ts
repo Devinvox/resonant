@@ -7,7 +7,7 @@ declare const self: ServiceWorkerGlobalScope;
 
 import { build, files, version } from '$service-worker';
 
-const CACHE_NAME = `pulse-cache-${version}`;
+const CACHE_NAME = `resonant-cache-${version}`;
 
 // Immutable assets: hashed JS/CSS bundles from the build
 const IMMUTABLE_ASSETS = new Set(build);
