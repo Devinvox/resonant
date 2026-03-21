@@ -117,8 +117,9 @@ export function logoutHandler(req: Request, res: Response): void {
 
 export function sessionCheckHandler(req: Request, res: Response): void {
   const config = getResonantConfig();
-  if (!config.auth.password) {
-    res.json({ authenticated: true });
+  const authRequired = !!config.auth.password;
+  if (!authRequired) {
+    res.json({ authenticated: true, auth_required: false });
     return;
   }
 

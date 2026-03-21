@@ -219,6 +219,25 @@ For things you want your companion to always know from the start, put them in `C
 
 ## Troubleshooting
 
+**`npm install` fails with `better-sqlite3` build error on Windows (VS Build Tools 2026)**
+
+Resonant uses `better-sqlite3`, which requires native compilation. The version of `node-gyp` bundled with npm may not recognise Visual Studio Build Tools 2026 (internal version 18). If you see `gyp ERR! find VS could not find a version of Visual Studio 2017 or newer`, use this workaround:
+
+```bash
+# Step 1: Install everything, skipping native build scripts
+npm install --ignore-scripts
+
+# Step 2: Install the latest node-gyp globally (has VS 2026 support)
+npm install -g node-gyp
+
+# Step 3: Rebuild better-sqlite3 using the global node-gyp
+cd node_modules/better-sqlite3
+node-gyp rebuild
+cd ../..
+```
+
+This only needs to be done once. After that, `npm run build` and `npm start` work normally.
+
 **"Claude Code process exited with code 1"**
 - Make sure you're logged into Claude Code: `claude login`
 - Check your subscription is active at [claude.ai](https://claude.ai)

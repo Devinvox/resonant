@@ -1,5 +1,6 @@
 let authenticated = $state(false);
 let checking = $state(true);
+let authRequired = $state(true);
 
 export async function checkAuth(): Promise<boolean> {
   checking = true;
@@ -12,6 +13,7 @@ export async function checkAuth(): Promise<boolean> {
     if (response.ok) {
       const data = await response.json();
       authenticated = data.authenticated === true;
+      if (data.auth_required === false) authRequired = false;
     } else {
       authenticated = false;
     }
@@ -66,4 +68,8 @@ export function isAuthenticated() {
 
 export function isChecking() {
   return checking;
+}
+
+export function isAuthRequired() {
+  return authRequired;
 }

@@ -1,6 +1,13 @@
 import { readFileSync, existsSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
+
+// Derive project root from this module's location (packages/backend/src/config.ts → ../../..)
+// This is stable regardless of process.cwd(), which npm workspaces can change.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const PROJECT_ROOT = resolve(__dirname, '..', '..', '..');
 
 export interface ResonantConfig {
   identity: {
@@ -143,9 +150,9 @@ export function loadConfig(configPath?: string): ResonantConfig {
   const searchPaths = configPath
     ? [configPath]
     : [
-        resolve('resonant.yaml'),
-        resolve('resonant.yml'),
-        resolve('config/resonant.yaml'),
+        join(PROJECT_ROOT, 'resonant.yaml'),
+        join(PROJECT_ROOT, 'resonant.yml'),
+        join(PROJECT_ROOT, 'config', 'resonant.yaml'),
       ];
 
   let fileConfig: Record<string, unknown> = {};
@@ -175,12 +182,13 @@ export function loadConfig(configPath?: string): ResonantConfig {
   if (process.env.DISCORD_ENABLED === 'true') merged.discord.enabled = true;
   if (process.env.TELEGRAM_ENABLED === 'true') merged.telegram.enabled = true;
 
-  // Resolve relative paths
-  merged.server.db_path = resolve(merged.server.db_path);
-  merged.agent.cwd = resolve(merged.agent.cwd);
-  merged.agent.claude_md_path = resolve(merged.agent.claude_md_path);
-  merged.agent.mcp_json_path = resolve(merged.agent.mcp_json_path);
-  merged.orchestrator.wake_prompts_path = resolve(merged.orchestrator.wake_prompts_path);
+  // Resolve relative paths against the project root (not cwd)
+  const resolveFromRoot = (p: string) => resolve(PROJECT_ROOT, p);
+  merged.server.db_path = resolveFromRoot(merged.server.db_path);
+  merged.agent.cwd = resolveFromRoot(merged.agent.cwd);
+  merged.agent.claude_md_path = resolveFromRoot(merged.agent.claude_md_path);
+  merged.agent.mcp_json_path = resolveFromRoot(merged.agent.mcp_json_path);
+  merged.orchestrator.wake_prompts_path = resolveFromRoot(merged.orchestrator.wake_prompts_path);
 
   _config = merged;
   return merged;
