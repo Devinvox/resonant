@@ -116,6 +116,10 @@ Full reference: [examples/resonant.yaml](examples/resonant.yaml)
 
 Your companion's personality lives in `CLAUDE.md`. Long-term memory uses Claude Code's native `memory.md` system — your companion learns and remembers automatically across sessions.
 
+Wake prompts (`prompts/wake.md`) control what your companion does during scheduled autonomous sessions. See [examples/wake-prompts.md](examples/wake-prompts.md) for a guide on writing effective prompts and adding custom wake types.
+
+Skills live in `skills/*/SKILL.md` — the companion discovers them automatically and can reference them during sessions. Add your own or use the included [arxiv-research](skills/arxiv-research/SKILL.md) skill.
+
 The hooks system injects real-time context into every message: current time, conversation flow, emotional markers, presence state, and more. See [docs/HOOKS.md](docs/HOOKS.md) for details.
 
 ### Themes
@@ -150,7 +154,9 @@ See [examples/themes/README.md](examples/themes/README.md) for the full variable
 Your agent gets a built-in CLI (`tools/sc.mjs`) with commands for reactions, voice messages, canvas, file sharing, semantic search, timers, impulses, watchers, and Telegram media. These are injected into the agent's context automatically. See [docs/TOOLS.md](docs/TOOLS.md) for the full reference.
 
 ### Orchestrator
-- Configurable morning/midday/evening check-ins
+- Configurable morning/midday/evening check-ins with customizable [wake prompts](examples/wake-prompts.md)
+- **Custom wake types** — add any schedule in `resonant.yaml` (e.g. `mid_morning`, `afternoon`)
+- Optional [program.md](examples/program.md) — structured session driver (adapted from [Karpathy's autoresearch](https://github.com/karpathy/autoresearch)) for focused autonomous work
 - Failsafe system — escalating outreach when you've been away
 - Timer and trigger system (impulses + watchers)
 - Condition-based automation (presence state, time windows)
@@ -181,8 +187,10 @@ resonant/
 ├── examples/
 │   ├── resonant.yaml    # Full config reference
 │   ├── CLAUDE.md        # Starter companion personality
-│   ├── wake-prompts.md  # Orchestrator prompt templates
+│   ├── wake-prompts.md  # Wake prompt guide + templates
+│   ├── program.md       # Structured session driver for autonomous work
 │   └── themes/          # CSS theme examples
+├── skills/              # Companion skills (SKILL.md frontmatter format)
 ├── tools/
 │   └── sc.mjs           # Agent CLI (reactions, search, timers, etc.)
 ├── docs/
