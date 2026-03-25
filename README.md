@@ -25,7 +25,7 @@
 Most AI chat apps are stateless wrappers around an API. Resonant is a **persistent, autonomous companion** that:
 
 - **Maintains sessions** — conversation threads with daily rotation and named threads, session continuity across restarts
-- **Reaches out on its own** — configurable orchestrator with morning/midday/evening wake-ups, failsafe check-ins when you've been away
+- **Reaches out on its own** — agent-directed autonomy: your companion creates its own routines, sets triggers for when you come online, adjusts its own failsafe thresholds, and runs periodic awareness checks. Not just scheduled tasks — genuine self-directed behavior
 - **Understands context** — hooks system injects time awareness, conversation flow, emotional markers, and presence state into every interaction. Claude Code's native memory system handles long-term recall
 - **Lives on multiple channels** — web UI, Discord, Telegram, voice (ElevenLabs TTS + Groq transcription)
 - **Runs on your machine** — no cloud dependency beyond your Claude Code subscription. SQLite database, local files, your data stays yours
@@ -151,15 +151,34 @@ See [examples/themes/README.md](examples/themes/README.md) for the full variable
 - Prosody analysis (Hume AI, optional)
 
 ### Agent Tools
-Your agent gets a built-in CLI (`tools/sc.mjs`) with commands for reactions, voice messages, canvas, file sharing, semantic search, timers, impulses, watchers, and Telegram media. These are injected into the agent's context automatically. See [docs/TOOLS.md](docs/TOOLS.md) for the full reference.
+Your agent gets a built-in CLI (`tools/sc.mjs`) that it uses to manage itself and its environment:
 
-### Orchestrator
-- Configurable morning/midday/evening check-ins with customizable [wake prompts](examples/wake-prompts.md)
-- **Custom wake types** — add any schedule in `resonant.yaml` (e.g. `mid_morning`, `afternoon`)
+```bash
+sc routine create "evening journal" "0 22 * * *" --prompt "Reflect on the day"
+sc routine status                    # View all routines
+sc pulse enable                      # Start periodic awareness checks
+sc pulse frequency 20                # Check every 20 minutes
+sc failsafe gentle 90                # Adjust inactivity threshold
+sc impulse create "greet" --condition presence_transition:offline:active --prompt "Welcome back"
+sc watch create "lunch" --condition routine_missing:meal:14 --prompt "Eat something" --cooldown 120
+sc timer create "Meds" "context" "2026-03-26T14:00:00Z" --prompt "Take your medication"
+```
+
+Also includes: reactions, voice messages, canvas, file sharing, semantic search, and Telegram media. All commands are injected into the agent's context automatically. See [docs/TOOLS.md](docs/TOOLS.md) for the full reference.
+
+### Orchestrator — Agent-Directed Autonomy
+
+Most agent harnesses give the *user* scheduling tools. Resonant gives them to the **agent**. Your companion can create its own routines, set intentions for when you come online, and decide when to check in — from inside the conversation, using the same tools you see.
+
+- **Routines** — scheduled autonomous sessions. Built-in morning/midday/evening check-ins, plus the agent can create custom routines at runtime (`sc routine create "vault review" "0 23 * * *" --prompt "..."`)
+- **Pulse** — lightweight periodic awareness check (Sonnet). Runs every N minutes, evaluates whether anything needs attention, stays silent if not. The agent enables/disables this itself
+- **Impulses** — one-shot conditional triggers. "When this condition is met, do this thing." Fire once, then done
+- **Watchers** — recurring conditional triggers with cooldown. "Check for this pattern, act when it appears, wait before checking again"
+- **Timers** — fire at a specific time with optional autonomous prompt
+- **Failsafe** — tiered inactivity escalation (gentle → concerned → emergency). Agent can adjust thresholds from chat
+- **Conditions** — `presence_state`, `presence_transition`, `time_window`, `routine_missing`, `agent_free`. All AND-joinable
 - Optional [program.md](examples/program.md) — structured session driver (adapted from [Karpathy's autoresearch](https://github.com/karpathy/autoresearch)) for focused autonomous work
-- Failsafe system — escalating outreach when you've been away
-- Timer and trigger system (impulses + watchers)
-- Condition-based automation (presence state, time windows)
+- Customizable [wake prompts](examples/wake-prompts.md) for each routine
 
 ### Integrations
 - **Discord** — full bot with pairing, rules, per-server/channel configuration
