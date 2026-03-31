@@ -62,6 +62,25 @@ function ensureInit() {
   }
 }
 
+// Persistent disabled MCP servers — survives restarts
+function disabledServersPath() {
+  return join(AGENT_CWD, '.resonant-disabled-servers.json');
+}
+function loadDisabledServers(): string[] {
+  try {
+    const p = disabledServersPath();
+    if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf-8'));
+  } catch { }
+  return [];
+}
+function saveDisabledServers(names: string[]): void {
+  try {
+    writeFileSync(disabledServersPath(), JSON.stringify(names, null, 2));
+  } catch (err) {
+    console.warn('Failed to save disabled servers:', err instanceof Error ? err.message : err);
+  }
+}
+
 // Presence state
 let presenceStatus: 'active' | 'dormant' | 'waking' | 'offline' = 'offline';
 
@@ -294,23 +313,38 @@ export class AgentService {
   }
 
   async toggleMcpServer(name: string, enabled: boolean): Promise<{ success: boolean; error?: string }> {
-    if (!activeQuery) {
-      return { success: false, error: 'No active session — will apply on next message' };
+    ensureInit();
+    // Persist state regardless of active session
+    const disabled = loadDisabledServers();
+    if (enabled) {
+      const idx = disabled.indexOf(name);
+      if (idx !== -1) disabled.splice(idx, 1);
+    } else {
+      if (!disabled.includes(name)) disabled.push(name);
     }
-    try {
-      await activeQuery.toggleMcpServer(name, enabled);
-      // Refresh cached status
-      const statuses = await activeQuery.mcpServerStatus();
-      cachedMcpStatus = statuses.map(s => ({
-        name: s.name, status: s.status, error: s.error,
-        toolCount: s.tools?.length ?? 0,
-        tools: s.tools?.map(t => ({ name: t.name, description: t.description })),
-        scope: s.scope,
-      }));
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    saveDisabledServers(disabled);
+
+    // Update cached status so UI reflects change immediately
+    cachedMcpStatus = cachedMcpStatus.map(s =>
+      s.name === name ? { ...s, status: enabled ? 'connected' : 'disabled' } : s
+    );
+
+    // Also apply to active session if running
+    if (activeQuery) {
+      try {
+        await activeQuery.toggleMcpServer(name, enabled);
+        const statuses = await activeQuery.mcpServerStatus();
+        cachedMcpStatus = statuses.map(s => ({
+          name: s.name, status: s.status, error: s.error,
+          toolCount: s.tools?.length ?? 0,
+          tools: s.tools?.map(t => ({ name: t.name, description: t.description })),
+          scope: s.scope,
+        }));
+      } catch (err) {
+        console.warn('toggleMcpServer live apply failed:', err instanceof Error ? err.message : err);
+      }
     }
+    return { success: true };
   }
 
   async rewindFiles(userMessageId: string, dryRun?: boolean): Promise<{ canRewind: boolean; filesChanged?: string[]; insertions?: number; deletions?: number; error?: string }> {
@@ -427,6 +461,21 @@ export class AgentService {
       ...(Object.keys(mcpServersFromConfig).length > 0 && { mcpServers: mcpServersFromConfig }),
     };
 
+    // Apply persistent disabled servers as disallowedTools
+    const disabledServers = loadDisabledServers();
+    if (disabledServers.length > 0 && cachedMcpStatus.length > 0) {
+      const disallowedTools: string[] = [];
+      for (const serverName of disabledServers) {
+        const server = cachedMcpStatus.find(s => s.name === serverName);
+        if (server?.tools) {
+          for (const tool of server.tools) {
+            disallowedTools.push(tool.name);
+          }
+        }
+      }
+      if (disallowedTools.length > 0) options.disallowedTools = disallowedTools;
+    }
+
     // Resume existing session if available
     if (thread.current_session_id) {
       options.resume = thread.current_session_id;
@@ -450,7 +499,7 @@ export class AgentService {
         if (existsSync(cfg.agent.cwd)) {
           writeFileSync(threadFilePath, threadId);
         }
-      } catch {}
+      } catch { }
 
       // Build orientation context (thread, time, gap, status, vault)
       // Prepended to prompt because SessionStart hooks don't fire in V1 query()
@@ -469,8 +518,18 @@ export class AgentService {
       const result = query({ prompt: enrichedPrompt, options });
       activeQuery = result;
 
-      // Refresh MCP server status (non-blocking — caches for settings panel)
-      result.mcpServerStatus().then(statuses => {
+      // Helper: fetch MCP status with retry (SDK may not be ready immediately)
+      const fetchMcpStatuses = async (retries = 3, delayMs = 1500) => {
+        for (let i = 0; i < retries; i++) {
+          const s = await result.mcpServerStatus();
+          if (s.length > 0) return s;
+          if (i < retries - 1) await new Promise(r => setTimeout(r, delayMs));
+        }
+        return await result.mcpServerStatus();
+      };
+
+      // Helper: run reconciliation against persistent disabled file
+      const reconcileMcpServers = async (statuses: Awaited<ReturnType<typeof result.mcpServerStatus>>) => {
         cachedMcpStatus = statuses.map(s => ({
           name: s.name,
           status: s.status,
@@ -480,152 +539,189 @@ export class AgentService {
           scope: s.scope,
         }));
         console.log(`MCP status refreshed: ${cachedMcpStatus.length} servers`);
-      }).catch(err => {
-        console.warn('Failed to get MCP status:', err instanceof Error ? err.message : err);
-      });
+
+        const disabledInFile = loadDisabledServers();
+        const toReEnable = cachedMcpStatus.filter(s => s.status === 'disabled' && !disabledInFile.includes(s.name));
+        const toDisable = cachedMcpStatus.filter(s => s.status !== 'disabled' && disabledInFile.includes(s.name));
+        if (toReEnable.length > 0 || toDisable.length > 0) {
+          if (toReEnable.length > 0) console.log(`[MCP] Re-enabling: ${toReEnable.map(s => s.name).join(', ')}`);
+          if (toDisable.length > 0) console.log(`[MCP] Disabling: ${toDisable.map(s => s.name).join(', ')}`);
+          await Promise.allSettled([
+            ...toReEnable.map(s => result.toggleMcpServer(s.name, true)),
+            ...toDisable.map(s => result.toggleMcpServer(s.name, false)),
+          ]);
+          const refreshed = await result.mcpServerStatus();
+          cachedMcpStatus = refreshed.map(s => ({
+            name: s.name,
+            status: s.status,
+            error: s.error,
+            toolCount: s.tools?.length ?? 0,
+            tools: s.tools?.map(t => ({ name: t.name, description: t.description })),
+            scope: s.scope,
+          }));
+          console.log(`[MCP] Post-reconcile: ${cachedMcpStatus.map(s => `${s.name}:${s.status}(${s.toolCount ?? 0}t)`).join(', ')}`);
+        }
+      };
+
+      // Autonomous wakes: block until MCP servers are ready before streaming
+      // (ensures Mind and other tools are available from the first turn)
+      if (isAutonomous && cachedMcpStatus.length === 0) {
+        try {
+          console.log('[MCP] Autonomous wake — waiting for MCP servers...');
+          const statuses = await fetchMcpStatuses();
+          await reconcileMcpServers(statuses);
+        } catch (err) {
+          console.warn('[MCP] Blocking init failed:', err instanceof Error ? err.message : err);
+        }
+      } else {
+        // Interactive: non-blocking refresh with retry
+        fetchMcpStatuses().then(reconcileMcpServers).catch(err => {
+          console.warn('Failed to get MCP status:', err instanceof Error ? err.message : err);
+        });
+      }
 
       // Simplified stream loop — hooks handle tool activity, audit, images
       // Inner try/catch for AbortError (stop_generation)
       try {
-      for await (const msg of result) {
-        // Capture session ID from any message
-        if (msg && typeof msg === 'object' && 'session_id' in msg) {
-          const newSessionId = msg.session_id as string;
-          if (newSessionId && newSessionId !== sessionId) {
-            sessionId = newSessionId;
-            // Update hook context so hooks log the correct session
-            hookContext.sessionId = sessionId;
-          }
-        }
-
-        if (!msg || typeof msg !== 'object' || !('type' in msg)) continue;
-
-        const msgType = (msg as any).type;
-
-        // Capture thinking from raw stream events (SDK strips them from assistant messages)
-        if (msgType === 'stream_event') {
-          const streamEvent = (msg as any).event;
-          if (streamEvent?.type === 'content_block_start' && streamEvent?.content_block?.type === 'thinking') {
-            currentThinkingAccum = '';
-          } else if (streamEvent?.type === 'content_block_delta' && streamEvent?.delta?.type === 'thinking_delta') {
-            const thinkingText = streamEvent.delta.thinking || '';
-            if (thinkingText) {
-              currentThinkingAccum += thinkingText;
+        for await (const msg of result) {
+          // Capture session ID from any message
+          if (msg && typeof msg === 'object' && 'session_id' in msg) {
+            const newSessionId = msg.session_id as string;
+            if (newSessionId && newSessionId !== sessionId) {
+              sessionId = newSessionId;
+              // Update hook context so hooks log the correct session
+              hookContext.sessionId = sessionId;
             }
-          } else if (streamEvent?.type === 'content_block_stop' && currentThinkingAccum) {
-            const summary = extractThinkingSummary(currentThinkingAccum);
-            thinkingBlocks.push({
-              textOffset: fullResponse.length,
-              content: currentThinkingAccum,
-              summary,
-            });
-            registry.broadcast({ type: 'thinking', content: currentThinkingAccum, summary });
-            currentThinkingAccum = '';
           }
-        }
 
-        if (msgType === 'assistant') {
-          const assistantMsg = msg as any;
-          if (assistantMsg.message?.content) {
-            for (const block of assistantMsg.message.content) {
-              if (block.type === 'text' && block.text) {
-                if (fullResponse) fullResponse += '\n\n' + block.text;
-                else fullResponse = block.text;
+          if (!msg || typeof msg !== 'object' || !('type' in msg)) continue;
 
+          const msgType = (msg as any).type;
+
+          // Capture thinking from raw stream events (SDK strips them from assistant messages)
+          if (msgType === 'stream_event') {
+            const streamEvent = (msg as any).event;
+            if (streamEvent?.type === 'content_block_start' && streamEvent?.content_block?.type === 'thinking') {
+              currentThinkingAccum = '';
+            } else if (streamEvent?.type === 'content_block_delta' && streamEvent?.delta?.type === 'thinking_delta') {
+              const thinkingText = streamEvent.delta.thinking || '';
+              if (thinkingText) {
+                currentThinkingAccum += thinkingText;
+              }
+            } else if (streamEvent?.type === 'content_block_stop' && currentThinkingAccum) {
+              const summary = extractThinkingSummary(currentThinkingAccum);
+              thinkingBlocks.push({
+                textOffset: fullResponse.length,
+                content: currentThinkingAccum,
+                summary,
+              });
+              registry.broadcast({ type: 'thinking', content: currentThinkingAccum, summary });
+              currentThinkingAccum = '';
+            }
+          }
+
+          if (msgType === 'assistant') {
+            const assistantMsg = msg as any;
+            if (assistantMsg.message?.content) {
+              for (const block of assistantMsg.message.content) {
+                if (block.type === 'text' && block.text) {
+                  if (fullResponse) fullResponse += '\n\n' + block.text;
+                  else fullResponse = block.text;
+
+                  registry.broadcast({
+                    type: 'stream_token',
+                    messageId: streamMsgId,
+                    token: fullResponse,
+                  });
+                }
+                // Thinking blocks are captured from stream_event, not here (avoids duplicates)
+              }
+            }
+          } else if (msgType === 'result') {
+            const resultMsg = msg as any;
+
+            // Extract context window usage from result
+            if (resultMsg.usage || resultMsg.model_usage) {
+              const usage = resultMsg.usage || {};
+              const modelUsage = resultMsg.model_usage;
+
+              // Get context window size from model usage if available
+              if (modelUsage) {
+                for (const model of Object.values(modelUsage) as any[]) {
+                  if (model?.context_window) {
+                    contextWindowSize = model.context_window;
+                  }
+                  if (model?.input_tokens) {
+                    contextTokensUsed = model.input_tokens + (model.output_tokens || 0);
+                  }
+                }
+              } else if (usage.input_tokens) {
+                contextTokensUsed = usage.input_tokens + (usage.output_tokens || 0);
+              }
+
+              if (contextWindowSize > 0 && contextTokensUsed > 0) {
+                const percentage = Math.round((contextTokensUsed / contextWindowSize) * 100);
+                console.log(`Context usage: ${contextTokensUsed} / ${contextWindowSize} (${percentage}%)`);
                 registry.broadcast({
-                  type: 'stream_token',
-                  messageId: streamMsgId,
-                  token: fullResponse,
+                  type: 'context_usage',
+                  percentage,
+                  tokensUsed: contextTokensUsed,
+                  contextWindow: contextWindowSize,
                 });
               }
-              // Thinking blocks are captured from stream_event, not here (avoids duplicates)
-            }
-          }
-        } else if (msgType === 'result') {
-          const resultMsg = msg as any;
-
-          // Extract context window usage from result
-          if (resultMsg.usage || resultMsg.model_usage) {
-            const usage = resultMsg.usage || {};
-            const modelUsage = resultMsg.model_usage;
-
-            // Get context window size from model usage if available
-            if (modelUsage) {
-              for (const model of Object.values(modelUsage) as any[]) {
-                if (model?.context_window) {
-                  contextWindowSize = model.context_window;
-                }
-                if (model?.input_tokens) {
-                  contextTokensUsed = model.input_tokens + (model.output_tokens || 0);
-                }
-              }
-            } else if (usage.input_tokens) {
-              contextTokensUsed = usage.input_tokens + (usage.output_tokens || 0);
             }
 
-            if (contextWindowSize > 0 && contextTokensUsed > 0) {
-              const percentage = Math.round((contextTokensUsed / contextWindowSize) * 100);
-              console.log(`Context usage: ${contextTokensUsed} / ${contextWindowSize} (${percentage}%)`);
+            if (resultMsg.subtype !== 'success') {
+              console.error('Agent error:', resultMsg.subtype, resultMsg.errors);
+            }
+          } else if (msgType === 'system') {
+            const systemMsg = msg as any;
+            // Detect compaction boundary
+            if (systemMsg.subtype === 'compact_boundary' && systemMsg.compact_metadata) {
+              const preTokens = systemMsg.compact_metadata.pre_tokens || contextTokensUsed;
+              console.log(`[Compaction] Context compacted. Pre-tokens: ${preTokens}`);
               registry.broadcast({
-                type: 'context_usage',
-                percentage,
-                tokensUsed: contextTokensUsed,
-                contextWindow: contextWindowSize,
+                type: 'compaction_notice',
+                preTokens,
+                message: `Context compacted (was ${Math.round(preTokens / 1000)}K tokens)`,
+                isComplete: true,
               });
+              // Reset tracking — new context window after compaction
+              contextTokensUsed = 0;
+              // Reset response buffer — pre-compaction text was incomplete and post-compaction
+              // re-grounding monologue must not leak into Discord/phone replies
+              if (fullResponse) {
+                console.log(`[Compaction] Resetting fullResponse (was ${fullResponse.length} chars, platform: ${platform})`);
+                fullResponse = '';
+              }
+              toolInsertions.length = 0;
+              thinkingBlocks.length = 0;
+            } else if (systemMsg.status === 'compacting') {
+              console.log('[Compaction] Compacting in progress...');
             }
-          }
-
-          if (resultMsg.subtype !== 'success') {
-            console.error('Agent error:', resultMsg.subtype, resultMsg.errors);
-          }
-        } else if (msgType === 'system') {
-          const systemMsg = msg as any;
-          // Detect compaction boundary
-          if (systemMsg.subtype === 'compact_boundary' && systemMsg.compact_metadata) {
-            const preTokens = systemMsg.compact_metadata.pre_tokens || contextTokensUsed;
-            console.log(`[Compaction] Context compacted. Pre-tokens: ${preTokens}`);
-            registry.broadcast({
-              type: 'compaction_notice',
-              preTokens,
-              message: `Context compacted (was ${Math.round(preTokens / 1000)}K tokens)`,
-              isComplete: true,
-            });
-            // Reset tracking — new context window after compaction
-            contextTokensUsed = 0;
-            // Reset response buffer — pre-compaction text was incomplete and post-compaction
-            // re-grounding monologue must not leak into Discord/phone replies
-            if (fullResponse) {
-              console.log(`[Compaction] Resetting fullResponse (was ${fullResponse.length} chars, platform: ${platform})`);
-              fullResponse = '';
+          } else if (msgType === 'rate_limit_event') {
+            const rle = msg as any;
+            const info = rle.rate_limit_info;
+            if (info && (info.status === 'rejected' || info.status === 'allowed_warning')) {
+              registry.broadcast({
+                type: 'rate_limit',
+                status: info.status,
+                resetsAt: info.resetsAt,
+                rateLimitType: info.rateLimitType,
+                utilization: info.utilization,
+              });
+              console.log(`[Agent] Rate limit: ${info.status}, type: ${info.rateLimitType}, resets: ${info.resetsAt}`);
             }
-            toolInsertions.length = 0;
-            thinkingBlocks.length = 0;
-          } else if (systemMsg.status === 'compacting') {
-            console.log('[Compaction] Compacting in progress...');
-          }
-        } else if (msgType === 'rate_limit_event') {
-          const rle = msg as any;
-          const info = rle.rate_limit_info;
-          if (info && (info.status === 'rejected' || info.status === 'allowed_warning')) {
+          } else if (msgType === 'tool_progress') {
+            const tp = msg as any;
             registry.broadcast({
-              type: 'rate_limit',
-              status: info.status,
-              resetsAt: info.resetsAt,
-              rateLimitType: info.rateLimitType,
-              utilization: info.utilization,
+              type: 'tool_progress',
+              toolId: tp.tool_use_id,
+              toolName: tp.tool_name,
+              elapsed: tp.elapsed_time_seconds,
             });
-            console.log(`[Agent] Rate limit: ${info.status}, type: ${info.rateLimitType}, resets: ${info.resetsAt}`);
           }
-        } else if (msgType === 'tool_progress') {
-          const tp = msg as any;
-          registry.broadcast({
-            type: 'tool_progress',
-            toolId: tp.tool_use_id,
-            toolName: tp.tool_name,
-            elapsed: tp.elapsed_time_seconds,
-          });
         }
-      }
       } catch (abortErr) {
         if (abortErr instanceof AbortError || (abortErr instanceof Error && abortErr.name === 'AbortError')) {
           console.log('[Agent] Generation stopped by user');
