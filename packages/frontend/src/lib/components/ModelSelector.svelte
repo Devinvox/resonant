@@ -5,11 +5,14 @@
     { id: 'claude-opus-4-6', label: 'Opus' },
     { id: 'claude-sonnet-4-6', label: 'Sonnet' },
     { id: 'claude-haiku-4-5', label: 'Haiku' },
+    { id: 'glm-5', label: 'GLM 5' },
+    { id: 'glm-5-turbo', label: 'GLM 5 Turbo' },
+    { id: 'glm-4-flash', label: 'GLM Flash (free)' },
   ] as const;
 
   let config = $derived(getConfig());
   let currentModel = $derived(config['agent.model'] || 'claude-opus-4-6');
-  let currentLabel = $derived(MODELS.find(m => m.id === currentModel)?.label || 'Opus');
+  let currentLabel = $derived(MODELS.find(m => m.id === currentModel)?.label || currentModel);
 
   let open = $state(false);
 

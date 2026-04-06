@@ -18,6 +18,7 @@ import { DiscordService } from './services/discord/index.js';
 import { TelegramService } from './services/telegram/index.js';
 import { rateLimiter, securityHeaders } from './middleware/security.js';
 import apiRoutes, { initCcRoutes } from './routes/api.js';
+import llmProxyRouter from './routes/llm-proxy.js';
 
 // Load config FIRST — before any other initialization
 const config = loadConfig();
@@ -103,6 +104,9 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Custom LLM proxy for handling Z.ai / Anthropic split routing
+app.use('/api/llm-proxy', llmProxyRouter);
+
 // All API routes — auth middleware is applied selectively inside the router
 app.use('/api', apiRoutes);
 
@@ -135,6 +139,9 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 
 // Create HTTP server
 const server = createServer(app);
+
+// Redirect Claude Agent SDK traffic through our local multi-model proxy
+process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${PORT}/api/llm-proxy`;
 
 // Initialize agent service (shared between WebSocket and orchestrator)
 const agentService = new AgentService();
