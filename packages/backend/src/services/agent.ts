@@ -1,8 +1,8 @@
 import { query, AbortError, listSessions, type Options, type Query, type McpServerConfig, type ListSessionsOptions } from '@anthropic-ai/claude-agent-sdk';
 import type { McpServerInfo } from '@resonant/shared';
-import { createMessage, updateThreadSession, getThread, updateThreadActivity, createSessionRecord, endSessionRecord } from './db.js';
+import { createMessage, updateThreadSession, getThread, updateThreadActivity, createSessionRecord, endSessionRecord, getConfig } from './db.js';
 import { registry } from './ws.js';
-import { createHooks, buildOrientationContext, type HookContext, type ToolInsertion } from './hooks.js';
+import { createHooks, buildOrientationContext, buildStaticContext, type HookContext, type ToolInsertion } from './hooks.js';
 import type { MessageSegment } from '@resonant/shared';
 import type { PushService } from './push.js';
 import { getResonantConfig } from '../config.js';
@@ -403,7 +403,7 @@ export class AgentService {
     });
   }
 
-  private async _processQuery(threadId: string, content: string, isAutonomous = false, threadMeta?: { name: string; type: 'daily' | 'named' }, platformOpts?: { platform?: 'web' | 'discord' | 'telegram' | 'api'; platformContext?: string }): Promise<string> {
+  private async _processQuery(threadId: string, content: string, isAutonomous = false, threadMeta?: { name: string; type: 'daily' | 'named' }, platformOpts?: { platform?: 'web' | 'discord' | 'telegram' | 'api'; platformContext?: string; isRetry?: boolean }): Promise<string> {
     ensureInit();
     const thread = getThread(threadId);
     if (!thread) throw new Error(`Thread ${threadId} not found`);
@@ -442,12 +442,16 @@ export class AgentService {
     // Two-tier model: autonomous wakes use cheaper model (configurable)
     // Interactive queries use primary model (configurable)
     const model = isAutonomous
-      ? cfg.agent.model_autonomous
-      : (cfg.agent.model || process.env.AGENT_MODEL || 'claude-sonnet-4-6');
+      ? (getConfig('agent.model_autonomous') || cfg.agent.model_autonomous)
+      : (getConfig('agent.model') || cfg.agent.model || process.env.AGENT_MODEL || 'claude-sonnet-4-6');
+    // Build system prompt: CLAUDE.md + static tools (sent once, not in message history)
+    const staticCtx = buildStaticContext(platform);
+    const systemAppend = [claudeMdContent, staticCtx].filter(Boolean).join('\n\n');
+
     const options: Options = {
       model,
-      systemPrompt: claudeMdContent
-        ? { type: 'preset', preset: 'claude_code', append: claudeMdContent }
+      systemPrompt: systemAppend
+        ? { type: 'preset', preset: 'claude_code', append: systemAppend }
         : { type: 'preset', preset: 'claude_code' },
       cwd: AGENT_CWD,
       permissionMode: 'bypassPermissions',
@@ -565,18 +569,19 @@ export class AgentService {
         }
       };
 
-      // Autonomous wakes: block until MCP servers are ready before streaming
+      // Block until MCP servers are ready on first message of session
       // (ensures Mind and other tools are available from the first turn)
-      if (isAutonomous && cachedMcpStatus.length === 0) {
+      // After first message, servers are already connected — non-blocking refresh
+      if (isFirstMessage || (isAutonomous && cachedMcpStatus.length === 0)) {
         try {
-          console.log('[MCP] Autonomous wake — waiting for MCP servers...');
+          console.log(`[MCP] ${isAutonomous ? 'Autonomous' : 'Interactive'} first message — waiting for MCP servers...`);
           const statuses = await fetchMcpStatuses();
           await reconcileMcpServers(statuses);
         } catch (err) {
           console.warn('[MCP] Blocking init failed:', err instanceof Error ? err.message : err);
         }
       } else {
-        // Interactive: non-blocking refresh with retry
+        // Subsequent messages: non-blocking refresh with retry
         fetchMcpStatuses().then(reconcileMcpServers).catch(err => {
           console.warn('Failed to get MCP status:', err instanceof Error ? err.message : err);
         });
@@ -732,8 +737,23 @@ export class AgentService {
           throw abortErr; // Re-throw non-abort errors to outer catch
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       const errMsg = error instanceof Error ? error.message : String(error);
+      const isAuthError = errMsg.includes('OAuth token has expired') ||
+        errMsg.includes('authentication_error') ||
+        errMsg.includes('401');
+
+      if (isAuthError && !platformOpts?.isRetry) {
+        console.warn(`[Agent] Authentication error detected for thread ${threadId}. Clearing session and retrying...`);
+        try {
+          updateThreadSession(threadId, null);
+          // Recursively call _processQuery once with isRetry flag
+          return this._processQuery(threadId, content, isAutonomous, threadMeta, { ...platformOpts, isRetry: true });
+        } catch (dbErr) {
+          console.error('[Agent] Failed to handle auth auto-recovery:', dbErr);
+        }
+      }
+
       console.error('Agent query error:', errMsg, error);
       fullResponse = fullResponse || `[Agent error: ${errMsg}]`;
     } finally {
