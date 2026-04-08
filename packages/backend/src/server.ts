@@ -1,3 +1,4 @@
+import './services/llm-interceptor.js';
 import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
@@ -18,7 +19,6 @@ import { DiscordService } from './services/discord/index.js';
 import { TelegramService } from './services/telegram/index.js';
 import { rateLimiter, securityHeaders } from './middleware/security.js';
 import apiRoutes, { initCcRoutes } from './routes/api.js';
-import llmProxyRouter from './routes/llm-proxy.js';
 
 // Load config FIRST — before any other initialization
 const config = loadConfig();
@@ -105,7 +105,149 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Custom LLM proxy for handling Z.ai / Anthropic split routing
-app.use('/api/llm-proxy', llmProxyRouter);
+// We must be perfectly transparent for Anthropic to support OAuth session tokens
+app.post('/api/llm-proxy/*', async (req, res) => {
+  try {
+    const body = req.body;
+    const model = (body.model || '').toLowerCase();
+    const isGlm = model.includes('glm');
+
+    // Exact path mapping: /api/llm-proxy/v1/messages -> /v1/messages
+    const path = req.originalUrl.replace('/api/llm-proxy', '');
+    const targetUrl = isGlm
+      ? `https://api.z.ai/api/anthropic${path}`
+      : `https://api.anthropic.com${path}`;
+
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      // Skip hop-by-hop headers
+      if (['host', 'connection', 'content-length', 'content-encoding'].includes(k.toLowerCase())) continue;
+      headers[k] = String(v);
+    }
+
+    if (isGlm) {
+      // Map frontend IDs to Z.ai supported slugs if necessary
+      const modelMap: Record<string, string> = {
+        'glm-4.7-flash': 'glm-4.7-flash',
+        'glm-4.5-air': 'glm-4-0520', // Common alias for 4.5 Air
+      };
+
+      const targetModel = modelMap[model] || model;
+
+      // DETAILED LOGGING to investigate token bloat
+      const messages = body.messages || [];
+      const totalMessages = messages.length;
+      const bodyStr = JSON.stringify(body);
+      const bodySize = Buffer.byteLength(bodyStr, 'utf8');
+
+      console.log(`\n========== LLM PROXY GLM REQUEST ==========`);
+      console.log(`Model: ${model} -> ${targetModel}`);
+      console.log(`URL: ${targetUrl}`);
+      console.log(`Body size: ${bodySize} bytes (~${Math.round(bodySize / 4)} tokens)`);
+      console.log(`Messages count: ${totalMessages}`);
+      console.log(`System prompt length: ${(body.system || '').length} chars`);
+
+      if (totalMessages > 0) {
+        const firstMsg = messages[0];
+        const lastMsg = messages[messages.length - 1];
+        console.log(`First message role: ${firstMsg.role}`);
+        console.log(`First message content length: ${JSON.stringify(firstMsg.content).length} chars`);
+        console.log(`Last message role: ${lastMsg.role}`);
+        console.log(`Last message content length: ${JSON.stringify(lastMsg.content).length} chars`);
+      }
+
+      // Log full body to file for inspection
+      const fs = await import('fs');
+      const logFile = 'C:\\Users\\Nout\\AI\\resonant\\packages\\backend\\journals\\llm-proxy-log.jsonl';
+
+      // TRUNCATION SAFETY VALVE: Protect LLM context from massive messages
+      // Skip for count_tokens — it needs full content for accurate counting
+      const isCountTokens = path.includes('count_tokens');
+      if (!isCountTokens && body.messages && Array.isArray(body.messages)) {
+        body.messages = body.messages.map((m: any, idx: number) => {
+          if (typeof m.content === 'string' && m.content.length > 10000) {
+            console.log(`[LLM Proxy] TRUNCATING message at index ${idx} (${m.content.length} -> 10000 chars)`);
+            return { ...m, content: m.content.slice(0, 10000) + '... [TRUNCATED BY PROXY FOR TOKEN SAFETY]' };
+          }
+          if (Array.isArray(m.content)) {
+            let truncated = false;
+            const newContent = m.content.map((block: any) => {
+              if (block.type === 'text' && block.text && block.text.length > 10000) {
+                truncated = true;
+                return { ...block, text: block.text.slice(0, 10000) + '... [TRUNCATED]' };
+              }
+              return block;
+            });
+            if (truncated) {
+              console.log(`[LLM Proxy] TRUNCATED text blocks in message at index ${idx}`);
+              return { ...m, content: newContent };
+            }
+          }
+          return m;
+        });
+      }
+
+      // Also guard system prompt just in case
+      if (typeof body.system === 'string' && body.system.length > 15000) {
+        console.log(`[LLM Proxy] TRUNCATING massive system prompt (${body.system.length} -> 15000 chars)`);
+        body.system = body.system.slice(0, 15000) + '... [TRUNCATED]';
+      }
+
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        model: targetModel,
+        body_size: Buffer.byteLength(JSON.stringify(body), 'utf8'),
+        message_count: body.messages?.length || 0,
+        body: body
+      };
+      fs.appendFileSync(logFile, JSON.stringify(logEntry) + '\n');
+
+      console.log(`Full request body logged to: ${logFile}`);
+      console.log(`==========================================\n`);
+
+      // Update body with the mapped/lowercased model name
+      body.model = targetModel;
+
+      headers['x-api-key'] = process.env.ZAI_API_KEY || '';
+      delete headers['authorization']; // Z.ai doesn't like the OAuth session token
+    } else {
+      // Transparent forward to Anthropic
+      // DO NOT change anything in authorization or x-api-key
+    }
+
+    const response = await fetch(targetUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+
+    if (response.status >= 400) {
+      const errText = await response.clone().text();
+      console.log(`[LLM Proxy] Target API returned ${response.status}: ${errText}`);
+    }
+
+    res.status(response.status);
+    response.headers.forEach((v, k) => {
+      if (k.toLowerCase() !== 'content-encoding' && k.toLowerCase() !== 'transfer-encoding') {
+        res.setHeader(k, v);
+      }
+    });
+
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+        if ((res as any).flush) (res as any).flush();
+      }
+    }
+    res.end();
+  } catch (err) {
+    console.error('[LLM Proxy] Error:', err);
+    res.status(500).json({ error: 'Proxy failed' });
+  }
+});
 
 // All API routes — auth middleware is applied selectively inside the router
 app.use('/api', apiRoutes);
@@ -141,10 +283,14 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 const server = createServer(app);
 
 // Redirect Claude Agent SDK traffic through our local multi-model proxy
-process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${PORT}/api/llm-proxy`;
+// This allows intercepting subprocesses spawned by the SDK
+const LOCAL_OVERRIDE = `http://127.0.0.1:${PORT}/api/llm-proxy`;
+process.env.ANTHROPIC_BASE_URL = LOCAL_OVERRIDE;
+console.log(`[LLM Proxy] ANTHROPIC_BASE_URL set to ${LOCAL_OVERRIDE}`);
 
 // Initialize agent service (shared between WebSocket and orchestrator)
 const agentService = new AgentService();
+
 
 // Initialize voice service
 const voiceService = new VoiceService();
@@ -215,6 +361,14 @@ server.listen(PORT, HOST, () => {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully...');
+
+  // Safety timeout: if we don't shut down in 5 seconds, force exit
+  const timeout = setTimeout(() => {
+    console.warn('[Server] Shutdown timed out after 5s, forcing exit.');
+    process.exit(1);
+  }, 5000);
+  timeout.unref();
+
   orchestrator.stop();
   if (discordService) await discordService.stop();
   if (telegramService) await telegramService.stop();
@@ -223,12 +377,21 @@ process.on('SIGTERM', async () => {
   server.close(() => {
     console.log('Server closed');
     db.close();
+    clearTimeout(timeout);
     process.exit(0);
   });
 });
 
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully...');
+
+  // Safety timeout: if we don't shut down in 5 seconds, force exit
+  const timeout = setTimeout(() => {
+    console.warn('[Server] Shutdown timed out after 5s, forcing exit.');
+    process.exit(1);
+  }, 5000);
+  timeout.unref();
+
   orchestrator.stop();
   if (discordService) await discordService.stop();
   if (telegramService) await telegramService.stop();
@@ -237,6 +400,7 @@ process.on('SIGINT', async () => {
   server.close(() => {
     console.log('Server closed');
     db.close();
+    clearTimeout(timeout);
     process.exit(0);
   });
 });

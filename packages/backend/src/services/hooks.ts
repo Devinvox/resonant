@@ -355,6 +355,21 @@ async function fetchMoodHistory(): Promise<string | null> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Safely slices a string while respecting UTF-16 surrogate pairs (emojis).
+ * Prevents "lone surrogates" that cause JSON parsing/encoding errors.
+ */
+function safeSlice(str: string, limit: number): string {
+  if (!str || str.length <= limit) return str;
+  // If we're cutting exactly between a high and low surrogate, back up by 1
+  let actualLimit = limit;
+  const charCode = str.charCodeAt(limit - 1);
+  if (charCode >= 0xd800 && charCode <= 0xdbff) {
+    actualLimit = limit - 1;
+  }
+  return str.slice(0, actualLimit);
+}
+
 export function summarizeInput(name: string, input: unknown): string {
   if (!input || typeof input !== 'object') return '';
   const obj = input as Record<string, unknown>;
@@ -427,7 +442,7 @@ function handleImageToolResult(toolName: string, output: string, threadId: strin
           imageBase64 = match[2];
         }
       } else if (parsed.url) {
-        console.log('Image URL detected but not downloading:', parsed.url.substring(0, 100));
+        console.log('Image URL detected but not downloading:', safeSlice(parsed.url, 100));
         return;
       }
     } catch {
@@ -523,7 +538,7 @@ function buildEmotionalContext(threadId: string): string {
 
   const flow = messages.slice(-5).map(m => {
     const speaker = m.role === 'user' ? userName : companionName;
-    let line = `${speaker}: ${m.content.substring(0, 60)}${m.content.length > 60 ? '...' : ''}`;
+    let line = `${speaker}: ${safeSlice(m.content, 60)}${m.content.length > 60 ? '...' : ''}`;
     // Include reactions if present
     if (m.metadata && typeof m.metadata === 'object') {
       const meta = m.metadata as Record<string, unknown>;
@@ -543,7 +558,7 @@ function buildEmotionalContext(threadId: string): string {
     if (m.metadata && typeof m.metadata === 'object') {
       const meta = m.metadata as Record<string, unknown>;
       if (Array.isArray(meta.reactions) && meta.reactions.length > 0) {
-        const preview = m.content.substring(0, 40) + (m.content.length > 40 ? '...' : '');
+        const preview = safeSlice(m.content, 40) + (m.content.length > 40 ? '...' : '');
         for (const r of meta.reactions as Array<{ emoji: string; user: string }>) {
           const reactor = r.user === 'user' ? userName : companionName;
           const whose = m.role === 'user' ? 'their own' : 'your';
@@ -568,7 +583,7 @@ function extractToolOutput(response: unknown): string {
   if (typeof response === 'string') return response;
   if (!response) return '';
   try {
-    return JSON.stringify(response).substring(0, 2000);
+    return safeSlice(JSON.stringify(response), 2000);
   } catch {
     return String(response);
   }
@@ -979,11 +994,59 @@ function scanSkillSummaries(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Orientation context — exported for agent.ts to prepend to prompts
-// (SessionStart hooks don't fire in V1 query(), so we inject directly)
+// Static context — injected into system prompt (not per-message [Context])
+// Skills summary, chat tools, telegram tools — sent once, never in history
 // ---------------------------------------------------------------------------
 
-export async function buildOrientationContext(ctx: HookContext, includeStatic = true): Promise<string> {
+export function buildStaticContext(platform?: 'web' | 'discord' | 'telegram' | 'api'): string {
+  const config = getResonantConfig();
+  const parts: string[] = [];
+
+  const skillsSummary = scanSkillSummaries();
+  if (skillsSummary) parts.push(skillsSummary);
+
+  const agentCwd = config.agent.cwd.replace(/\\/g, '/');
+  const cliPath = join(agentCwd, 'tools', 'sc.mjs');
+  if (existsSync(cliPath)) {
+    const SC = `node ${cliPath.replace(/\\/g, '/')}`;
+    parts.push([
+      `SC=${SC}`,
+      `CHAT: $SC share <path> | canvas create|update "Title" <path> [type] | react last[-N] "emoji" [remove] | voice "[tone] text" | search "q" [--thread ID] [--role companion|user] [--after|--before YYYY-MM-DD] | backfill start|status|stop`,
+      `ROUTINES: $SC routine status|enable|disable|reschedule|create|remove [args] — persist across restarts`,
+      `PULSE: $SC pulse status|enable|disable|frequency <MIN> — silent=PULSE_OK, else posts`,
+      `FAILSAFE: $SC failsafe status|enable|disable|gentle|concerned|emergency <MIN>`,
+      `TIMERS: $SC timer create "label" "ctx" "fireAt" | list | cancel <ID>`,
+      `IMPULSE: $SC impulse create "label" --condition <cond> --prompt "text" | list | cancel <ID>`,
+      `WATCHERS: $SC watch create "label" --condition <cond> --cooldown <MIN> --prompt "text" | list | cancel <ID>`,
+      `  Conditions: presence_state:<s>, presence_transition:<from>:<to>, agent_free, time_window:<HH:MM>, routine_missing:<name>:<h>. AND-joined.`,
+    ].join('\n'));
+  }
+
+  if (platform === 'telegram' && existsSync(cliPath)) {
+    const SC = `node ${cliPath.replace(/\\/g, '/')}`;
+    parts.push([
+      '',
+      'TELEGRAM TOOLS (available because user is on Telegram):',
+      `  ${SC} tg photo /path/to/image.png "caption"`,
+      `  ${SC} tg photo --url "https://..." "caption"`,
+      `  ${SC} tg doc /path/to/file.pdf "caption"`,
+      `  ${SC} tg gif "search query" "optional caption"`,
+      `  ${SC} tg react last "\u2764\ufe0f"`,
+      `  ${SC} tg voice "text with [tone tags]"`,
+      `  ${SC} tg text "proactive message"`,
+    ].join('\n'));
+  }
+
+  return parts.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Orientation context — exported for agent.ts to prepend to prompts
+// (SessionStart hooks don't fire in V1 query(), so we inject directly)
+// Now contains ONLY dynamic content — static tools/skills moved to system prompt
+// ---------------------------------------------------------------------------
+
+export async function buildOrientationContext(ctx: HookContext, _includeStatic?: boolean): Promise<string> {
   const config = getResonantConfig();
   const userName = config.identity.user_name;
   const companionName = config.identity.companion_name;
@@ -1011,7 +1074,7 @@ export async function buildOrientationContext(ctx: HookContext, includeStatic = 
       const ago = formatTimeGap(Math.round((Date.now() - new Date(h.timestamp).getTime()) / 60000));
       parts.push(`Last session: "${h.thread}" (${h.reason}, ${ago}). ${h.excerpt}${h.excerpt ? '...' : ''}`);
     }
-  } catch {}
+  } catch { }
 
   // Active triggers (watchers/impulses)
   try {
@@ -1024,7 +1087,7 @@ export async function buildOrientationContext(ctx: HookContext, includeStatic = 
       if (impulses > 0) triggerParts.push(`${impulses} impulse${impulses > 1 ? 's' : ''}`);
       parts.push(`Active triggers: ${triggerParts.join(', ')}`);
     }
-  } catch {}
+  } catch { }
 
   // User presence state + time gap since last activity
   // These methods may or may not exist on the registry depending on implementation
@@ -1047,7 +1110,7 @@ export async function buildOrientationContext(ctx: HookContext, includeStatic = 
         parts.push(`${userName}'s device: ${deviceType}`);
       }
     }
-  } catch {}
+  } catch { }
 
   // Life API status + mood history — fetch in parallel if configured (or CC enabled)
   if (!ctx.isAutonomous && (config.integrations.life_api_url || config.command_center.enabled)) {
@@ -1059,112 +1122,22 @@ export async function buildOrientationContext(ctx: HookContext, includeStatic = 
     if (moodHistory) parts.push(moodHistory);
   }
 
-  // Static content — only on first message of a session (skills summary)
-  if (includeStatic) {
-    const skillsSummary = scanSkillSummaries();
-    if (skillsSummary) {
-      parts.push(skillsSummary);
-    }
-  }
-
-  // Chat tools — injected EVERY message (companion loses these after compaction otherwise)
-  const agentCwd = config.agent.cwd.replace(/\\/g, '/');
-  const cliPath = join(agentCwd, 'tools', 'sc.mjs');
-  if (existsSync(cliPath)) {
-    const SC = `node ${cliPath.replace(/\\/g, '/')}`;
-    parts.push([
-      `CHAT TOOLS (run via Bash \u2014 threadId auto-injected):`,
-      `  ${SC} share /absolute/path/to/file`,
-      `  ${SC} canvas create "Title" /path/to/file.md markdown`,
-      `  ${SC} canvas create-inline "Title" "short text" text`,
-      `  ${SC} canvas update CANVAS_ID /path/to/file`,
-      `  contentType: markdown|code|text|html. Files in shared/ auto-share.`,
-      `  ${SC} react last "\u2764\ufe0f"             (react to last message)`,
-      `  ${SC} react last-2 "\ud83d\udd25"           (react to 2nd-to-last message)`,
-      `  ${SC} react last "\u2764\ufe0f" remove      (remove a reaction)`,
-      `  ${SC} voice "[whispers] hey [sighs] I missed you"`,
-      `  ${SC} search "semantic query"              (search all threads by meaning)`,
-      `  ${SC} search "query" --thread THREAD_ID    (search specific thread)`,
-      `  ${SC} search "query" --role companion|user  (filter by speaker)`,
-      `  ${SC} search "query" --after 2026-03-01    (messages after date)`,
-      `  ${SC} search "query" --before 2026-03-15   (messages before date)`,
-      `  ${SC} backfill start [batch] [intervalMs]   (background indexing, default 50/5000ms)`,
-      `  ${SC} backfill status                      (check indexing progress)`,
-      `  ${SC} backfill stop                        (halt background indexing)`,
-      '',
-      'ROUTINES (scheduled autonomous sessions):',
-      `  ${SC} routine status|enable|disable|reschedule [wakeType] [cronExpr]`,
-      `  ${SC} routine create "label" "cronExpr" --prompt "what to do when it fires"`,
-      `  ${SC} routine remove ROUTINE_ID`,
-      '  Custom routines persist across restarts. Use this to set autonomous intentions.',
-      '',
-      'PULSE (lightweight awareness, can stay silent):',
-      `  ${SC} pulse status|enable|disable`,
-      `  ${SC} pulse frequency MINUTES                (min 5, default 15)`,
-      '  Runs periodically during waking hours. Skips if user is active or agent is busy.',
-      '  Respond PULSE_OK to stay silent. Anything else gets posted.',
-      '',
-      'FAILSAFE (inactivity escalation):',
-      `  ${SC} failsafe status`,
-      `  ${SC} failsafe enable|disable`,
-      `  ${SC} failsafe gentle|concerned|emergency MINUTES`,
-      '  Tiers: gentle (chat) → concerned (escalate) → emergency (all channels)',
-      '',
-      'TIMERS:',
-      `  ${SC} timer create "label" "context" "fireAt"`,
-      `  ${SC} timer list`,
-      `  ${SC} timer cancel TIMER_ID`,
-      '',
-      'IMPULSE QUEUE (one-shot, condition-based):',
-      `  ${SC} impulse create "label" --condition presence_state:active --prompt "text"`,
-      `  ${SC} impulse list`,
-      `  ${SC} impulse cancel TRIGGER_ID`,
-      '',
-      'WATCHERS (recurring, cooldown-protected):',
-      `  ${SC} watch create "label" --condition presence_transition:offline:active --prompt "text" --cooldown 480`,
-      `  ${SC} watch list`,
-      `  ${SC} watch cancel TRIGGER_ID`,
-      '  Conditions: presence_state:<state>, presence_transition:<from>:<to>, agent_free, time_window:<HH:MM>, routine_missing:<name>:<hour>',
-      '  All conditions AND-joined. Cooldown in minutes (default 120).',
-    ].join('\n'));
-
-    // Telegram-specific tools — injected when on Telegram
-    if (ctx.platform === 'telegram') {
-      parts.push([
-        '',
-        'TELEGRAM TOOLS (available because user is on Telegram):',
-        `  ${SC} tg photo /path/to/image.png "caption"`,
-        `  ${SC} tg photo --url "https://..." "caption"`,
-        `  ${SC} tg doc /path/to/file.pdf "caption"`,
-        `  ${SC} tg gif "search query" "optional caption"`,
-        `  ${SC} tg react last "\u2764\ufe0f"`,
-        `  ${SC} tg voice "text with [tone tags]"`,
-        `  ${SC} tg text "proactive message"`,
-      ].join('\n'));
-    }
-  }
-
-  // Recent reactions — so companion sees user's reactions on each interaction
+  // NOTE: Static content (skills, chat tools, telegram tools) moved to system prompt
+  // via buildStaticContext() — no longer injected into per-message [Context] block
+  // Recent reactions — compressed format (Devin can't see metadata in API messages)
   try {
-    const recentMsgs = getMessages({ threadId: ctx.threadId, limit: 20 });
-    const rxnLines: string[] = [];
+    const recentMsgs = getMessages({ threadId: ctx.threadId, limit: 10 });
+    const rxns: string[] = [];
     for (const m of recentMsgs) {
-      if (m.metadata && typeof m.metadata === 'object') {
-        const meta = m.metadata as Record<string, unknown>;
-        if (Array.isArray(meta.reactions) && meta.reactions.length > 0) {
-          const preview = m.content.substring(0, 50) + (m.content.length > 50 ? '...' : '');
-          for (const r of meta.reactions as Array<{ emoji: string; user: string }>) {
-            const reactor = r.user === 'user' ? userName : companionName;
-            const whose = m.role === 'user' ? 'their own' : 'your';
-            rxnLines.push(`  ${reactor} reacted ${r.emoji} to ${whose} message: "${preview}" (msg id: ${m.id})`);
-          }
+      const meta = m.metadata as Record<string, unknown> | null;
+      if (meta && Array.isArray(meta.reactions) && meta.reactions.length > 0) {
+        for (const r of meta.reactions as Array<{ emoji: string; user: string }>) {
+          rxns.push(`${r.emoji} ${r.user === 'user' ? 'U' : 'D'} on ${m.role === 'user' ? 'own' : 'your'} msg:${m.id}`);
         }
       }
     }
-    if (rxnLines.length > 0) {
-      parts.push(`RECENT REACTIONS:\n${rxnLines.join('\n')}`);
-    }
-  } catch {}
+    if (rxns.length > 0) parts.push(`RXN: ${rxns.join(' | ')}`);
+  } catch { }
 
   // Append platform-specific context (channel history, etc.)
   if (ctx.platformContext) {
@@ -1200,7 +1173,7 @@ function buildSessionStart(ctx: HookContext): HookCallback {
       try {
         const reg = ctx.registry as any;
         userConnected = typeof reg.isUserConnected === 'function' ? reg.isUserConnected() : false;
-      } catch {}
+      } catch { }
       parts.push(`Session resumed. ${lastPreview}. ${userName} ${userConnected ? 'is connected' : 'is not connected'}.`);
     } else if (source === 'startup') {
       parts.push(`Fresh session. Mode: ${ctx.isAutonomous ? 'autonomous' : 'interactive'}.`);
