@@ -441,9 +441,10 @@ export class AgentService {
     // Build query options — V1 API (full config support)
     // Two-tier model: autonomous wakes use cheaper model (configurable)
     // Interactive queries use primary model (configurable)
+    const interactiveModel = getConfig('agent.model') || cfg.agent.model || process.env.AGENT_MODEL || 'claude-sonnet-4-6';
     const model = isAutonomous
-      ? (getConfig('agent.model_autonomous') || cfg.agent.model_autonomous)
-      : (getConfig('agent.model') || cfg.agent.model || process.env.AGENT_MODEL || 'claude-sonnet-4-6');
+      ? interactiveModel // User requested routines to follow the actively selected interactive model
+      : interactiveModel;
     // Build system prompt: CLAUDE.md + static tools (sent once, not in message history)
     const staticCtx = buildStaticContext(platform);
     const systemAppend = [claudeMdContent, staticCtx].filter(Boolean).join('\n\n');
