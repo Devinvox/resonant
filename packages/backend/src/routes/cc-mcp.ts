@@ -2,9 +2,20 @@
 // Exposes all command center tools as MCP tools callable by the companion in chat
 import { Router } from 'express';
 import * as cc from '../services/cc.js';
-import { getConfig, setConfig } from '../services/db.js';
+import {
+  getConfig,
+  setConfig,
+  createCanvas,
+  getCanvas,
+  listCanvases,
+  updateCanvasContent,
+  updateCanvasTitle,
+  deleteCanvas
+} from '../services/db.js';
 import { getResonantConfig } from '../config.js';
+import { randomUUID } from 'node:crypto';
 
+import { registry } from '../services/ws.js';
 const router = Router();
 
 // Tool definitions — what the companion sees when the agent lists tools
@@ -216,6 +227,22 @@ const TOOLS = [
         action: { type: 'string', enum: ['get', 'set'], description: 'Action' },
         emoji: { type: 'string', description: 'Status emoji' },
         label: { type: 'string', description: 'Status label' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'cc_canvas',
+    description: 'Manage canvases and persistent notes. Actions: create, list, read, update, delete.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'list', 'read', 'update', 'delete'], description: 'Action' },
+        id: { type: 'string', description: 'Canvas ID (UUID)' },
+        title: { type: 'string' },
+        content: { type: 'string' },
+        contentType: { type: 'string', enum: ['markdown', 'code', 'text', 'html'], default: 'markdown' },
+        language: { type: 'string', description: 'Programming language (for code)' },
       },
       required: ['action'],
     },
@@ -468,6 +495,59 @@ function handleTool(name: string, args: any): string {
         return `Status set: ${args.emoji || ''} ${args.label || ''}`;
       }
       return 'Unknown action. Use: get, set.';
+    }
+
+    case 'cc_canvas': {
+      try {
+        const a = args.action;
+        const now = new Date().toISOString();
+
+        if (a === 'create') {
+          const id = randomUUID();
+          const canvas = createCanvas({
+            id,
+            title: args.title || 'Untitled Note',
+            content: args.content || '',
+            contentType: args.contentType || 'markdown',
+            language: args.language,
+            createdBy: 'companion',
+            createdAt: now,
+          });
+          registry.broadcast({ type: "canvas_created", canvas });
+          return `Canvas created: ${canvas.title} (${canvas.id})`;
+        }
+
+        if (a === 'list') {
+          const canvases = listCanvases();
+          if (canvases.length === 0) return 'No canvases found.';
+          return canvases.map(c => `• [${c.id}] ${c.title} (${c.content_type})`).join('\n');
+        }
+
+        if (a === 'read') {
+          if (!args.id) return 'Error: Canvas ID is required for read.';
+          const canvas = getCanvas(args.id);
+          if (!canvas) return 'Error: Canvas not found.';
+          return `Title: ${canvas.title}\nType: ${canvas.content_type}\n---\n${canvas.content}`;
+        }
+
+        if (a === 'update') {
+          if (!args.id) return 'Error: Canvas ID is required for update.';
+          if (args.content !== undefined) updateCanvasContent(args.id, args.content, now);
+          if (args.title !== undefined) updateCanvasTitle(args.id, args.title, now);
+          registry.broadcast({ type: "canvas_updated", canvasId: args.id, content: args.content ?? undefined, title: args.title ?? undefined, updatedAt: now });
+          return 'Canvas updated.';
+        }
+
+        if (a === 'delete') {
+          if (!args.id) return 'Error: Canvas ID is required for delete.';
+          const ok = deleteCanvas(args.id);
+          if (ok) registry.broadcast({ type: "canvas_deleted", canvasId: args.id });
+          return ok ? 'Canvas deleted.' : 'Canvas not found.';
+        }
+        return 'Unknown action. Use: create, list, read, update, delete.';
+      } catch (err: any) {
+        return `Error in cc_canvas handler: ${err.message}`;
+      }
     }
 
     default:

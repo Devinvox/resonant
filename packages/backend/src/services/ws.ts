@@ -57,7 +57,7 @@ function getAllowedOrigins(): string[] {
   return Array.from(origins);
 }
 
-const MAX_TEXT_MESSAGE_SIZE = 10 * 1024; // 10KB for text messages
+const MAX_TEXT_MESSAGE_SIZE = 100 * 1024; // 100KB - canvas content can be large // 10KB for text messages
 const MAX_VOICE_MESSAGE_SIZE = 512 * 1024; // 512KB for voice audio chunks
 const COOKIE_NAME = 'resonant_session';
 
@@ -909,10 +909,10 @@ async function handleVoiceStop(ws: ExtendedWebSocket): Promise<void> {
       voiceServiceInstance.transcribe(audioBuffer, ws.audioMimeType),
       voiceServiceInstance.canAnalyzeProsody
         ? voiceServiceInstance.analyzeProsody(audioBuffer, ws.audioMimeType, prosodyAbort.signal).catch(err => {
-            if (err?.name === 'AbortError') return null;
-            console.warn('[Voice] Prosody analysis failed (continuing):', err);
-            return null;
-          })
+          if (err?.name === 'AbortError') return null;
+          console.warn('[Voice] Prosody analysis failed (continuing):', err);
+          return null;
+        })
         : Promise.resolve(null),
     ]);
 
@@ -995,6 +995,14 @@ function handleCanvasUpdate(
   }
 
   const now = new Date().toISOString();
+
+  // Safety guard: Don't allow wiping the entire canvas with empty content via WebSocket
+  // this prevents race conditions during frontend initialization
+  if (msg.content === '' && canvas.content && canvas.content.length > 100) {
+    console.warn(`[WS] Blocked suspicious empty update for canvas ${msg.canvasId}`);
+    return;
+  }
+
   updateCanvasContent(msg.canvasId, msg.content, now);
 
   // Broadcast to everyone except the sender (avoids cursor jump)
