@@ -40,7 +40,7 @@
     getLastCommandResult,
     clearCommandResult,
   } from '$lib/stores/websocket.svelte';
-  import { loadSettings, getCompanionName } from '$lib/stores/settings.svelte';
+  import { loadSettings, getCompanionName, getConfig, updateSetting } from '$lib/stores/settings.svelte';
   import type { Message } from '@resonant/shared';
 
   // Reactive state from stores
@@ -68,9 +68,21 @@
   // Search state
   let searchOpen = $state(false);
 
+  // Edit draft — filled when user clicks edit on a message
+  let editDraft = $state({ text: '', ts: 0 });
+  function handleEditMessage(e: Event) {
+    const ce = e as CustomEvent;
+    if (ce.detail) {
+      editDraft = { text: ce.detail, ts: Date.now() };
+    }
+  }
+
   // Workspace drawers
   let canvasPanelOpen = $state(false);
+// Chat/Code mode toggle
+  let chatMode = $state(false);
 
+  let moreMenuOpen = $state(false);
   // New thread modal
   let newThreadOpen = $state(false);
   let newThreadName = $state('');
@@ -79,6 +91,19 @@
 
   function toggleSearch() {
     searchOpen = !searchOpen;
+  }
+
+  function handleSync() {
+    if (activeThreadId && messages.length > 0) {
+      const last = messages[messages.length - 1];
+      send({
+        type: 'sync',
+        lastSeenSequence: last.sequence,
+        threadId: activeThreadId
+      });
+    } else if (activeThreadId) {
+      loadThread(activeThreadId);
+    }
   }
 
   function openSettings() {
@@ -102,6 +127,10 @@
     localStorage.setItem('resonant-theme', next);
   }
 
+  async function toggleChatMode() {
+    chatMode = !chatMode;
+    await updateSetting('agent.chat_mode', String(chatMode));
+  }
   function openNewThreadModal() {
     newThreadName = '';
     newThreadOpen = true;
@@ -168,6 +197,7 @@
   let readObserver: IntersectionObserver | null = null;
   let loadingOlder = $state(false);
   let hasMoreMessages = $state(true);
+  let showScrollToBottom = $state(false);
 
   // Total unread count
   const totalUnread = $derived(
@@ -250,6 +280,7 @@
     const threshold = 100; // pixels from bottom
 
     shouldAutoScroll = scrollHeight - scrollTop - clientHeight < threshold;
+    showScrollToBottom = scrollHeight - scrollTop - clientHeight > 400;
 
     // Load older messages when scrolled near top
     if (scrollTop < 100 && !loadingOlder && hasMoreMessages && activeThreadId && messages.length > 0) {
@@ -278,10 +309,14 @@
   }
 
   // Auto-scroll to bottom
-  function scrollToBottom() {
-    if (!messagesContainer || !shouldAutoScroll) return;
-
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  function scrollToBottom(force = false) {
+    if (!messagesContainer) return;
+    if (force || shouldAutoScroll) {
+      messagesContainer.scrollTo({
+        top: messagesContainer.scrollHeight,
+        behavior: force ? 'smooth' : 'auto'
+      });
+    }
   }
 
   // Toggle sidebar on mobile
@@ -335,6 +370,11 @@
   // Load initial data and connect
   onMount(async () => {
     await Promise.all([loadThreads(), loadSettings()]);
+// Load chat mode from config
+    try {
+      const cfg = await getConfig();
+      chatMode = cfg['agent.chat_mode'] === 'true';
+    } catch (e) {}
     connect();
     window.addEventListener('keydown', handleGlobalKeydown);
 
@@ -418,23 +458,41 @@
       </div>
 
       <div class="header-actions">
+        <!-- Chat/Code mode toggle -->
+        <button
+          class="header-icon-btn mode-toggle"
+          class:active={chatMode}
+          onclick={toggleChatMode}
+          title={chatMode ? 'Chat mode — click for Code' : 'Code mode — click for Chat'}
+          aria-label="Toggle chat/code mode"
+        >
+          {#if chatMode}
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+          {:else}
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+            </svg>
+          {/if}
+        </button>
         <a href="/cc" class="header-icon-btn" aria-label="Command Center" title="Command Center">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0h4"/>
           </svg>
         </a>
-        <button class="header-icon-btn" onclick={toggleSearch} aria-label="Search messages (Ctrl+K)" title="Search (Ctrl+K)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-          </svg>
-        </button>
         {#if isStreamingNow}
-          <button class="header-icon-btn stop-btn" onclick={sendStopGeneration} aria-label="Stop generation (Escape)" title="Stop (Esc)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="4" y="4" width="16" height="16" rx="2"/>
+          <button class="header-icon-btn stop-btn" onclick={sendStopGeneration} title="Stop generation">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="5" y="5" width="14" height="14" rx="2" />
             </svg>
           </button>
         {/if}
+        <button class="header-icon-btn" onclick={handleSync} title="Sync messages">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
+          </svg>
+        </button>
         {#if contextUsage}
           <ContextIndicator
             percentage={contextUsage.percentage}
@@ -445,30 +503,34 @@
         {#if totalUnread > 0}
           <div class="unread-badge">{totalUnread}</div>
         {/if}
-        <button
-          class="header-icon-btn"
-          class:active={canvasPanelOpen || !!activeCanvasId}
-          onclick={toggleCanvasPanel}
-          aria-label="Canvas"
-          title="Canvas"
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="4" width="18" height="16" rx="2"/>
-            <path d="M9 4v16"/>
-            <path d="M9 10h12"/>
-          </svg>
-        </button>
-        <a href="/files" class="header-icon-link" aria-label="Files">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-          </svg>
-        </a>
-        <button class="header-icon-btn" onclick={toggleTheme} aria-label="Toggle light/dark mode" title="Toggle theme">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-          </svg>
-        </button>
+        <!-- More menu: search, canvas, files, theme -->
+        <div class="more-menu-wrapper">
+          <button class="header-icon-btn" onclick={() => moreMenuOpen = !moreMenuOpen} title="More" aria-label="More options">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/>
+            </svg>
+          </button>
+          {#if moreMenuOpen}
+            <div class="more-menu-dropdown" onfocusout={() => moreMenuOpen = false}>
+              <button onclick={() => { toggleSearch(); moreMenuOpen = false; }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                Search
+              </button>
+              <button onclick={() => { toggleCanvasPanel(); moreMenuOpen = false; }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path d="M9 10h12"/></svg>
+                Canvas
+              </button>
+              <a href="/files" onclick={() => moreMenuOpen = false}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                Files
+              </a>
+              <button onclick={() => { toggleTheme(); moreMenuOpen = false; }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                Theme
+              </button>
+            </div>
+          {/if}
+        </div>
         <a href="/settings" class="settings-link" aria-label="Settings">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
@@ -533,10 +595,6 @@
             <div
               id="msg-{message.id}"
               class="message-wrapper"
-              role="button"
-              tabindex="0"
-              aria-label={`Reply to ${message.role === 'companion' ? companionName : 'You'} message`}
-              oncontextmenu={(e) => { e.preventDefault(); handleReply(message); }}
               onkeydown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
@@ -544,7 +602,13 @@
                 }
               }}
             >
-              <MessageBubble message={message} toolEvents={toolEventsMap[message.id] || []} segments={message.metadata?.segments as any || null} {companionName} />
+              <MessageBubble
+                message={message}
+                toolEvents={toolEventsMap[message.id] || []}
+                segments={message.metadata?.segments as any || null}
+                {companionName}
+                onedit={(content) => editDraft = { text: content, ts: Date.now() }}
+              />
             </div>
           {/each}
 
@@ -613,11 +677,25 @@
       </div>
     </div>
 
+    {#if showScrollToBottom}
+      <button
+        class="scroll-bottom-btn"
+        onclick={() => scrollToBottom(true)}
+        aria-label="Scroll to bottom"
+        title="Jump to bottom"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 13l5 5 5-5M7 6l5 5 5-5"/>
+        </svg>
+      </button>
+    {/if}
+
     <!-- Input area -->
     <MessageInput
       replyTo={replyTo}
       isStreaming={isStreamingNow}
       activeThreadId={activeThreadId}
+      {editDraft}
       onbatchsend={handleBatchSend}
       oncancelreply={handleCancelReply}
       onstop={sendStopGeneration}
@@ -841,6 +919,50 @@
     color: #ff6b6b !important;
   }
 
+
+  .mode-toggle.active {
+    color: #f59e0b;
+    filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.4));
+  }
+
+  .more-menu-wrapper {
+    position: relative;
+  }
+
+  .more-menu-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: var(--bg-secondary, #1a1b26);
+    border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+    border-radius: 8px;
+    padding: 4px;
+    min-width: 140px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+
+  .more-menu-dropdown button,
+  .more-menu-dropdown a {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    background: none;
+    border: none;
+    color: var(--text-primary, #c0caf5);
+    font-size: 13px;
+    cursor: pointer;
+    border-radius: 6px;
+    text-decoration: none;
+  }
+
+  .more-menu-dropdown button:hover,
+  .more-menu-dropdown a:hover {
+    background: var(--bg-hover, rgba(255,255,255,0.06));
+  }
+
   @keyframes stopPulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.6; }
@@ -936,6 +1058,9 @@
     overflow-y: auto;
     overflow-x: hidden;
     background: var(--bg-primary);
+    overscroll-behavior-y: contain;
+    overflow-anchor: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .messages-list {
@@ -996,11 +1121,14 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    padding: 1rem 1.25rem;
-    border-radius: 0;
+    padding: 0.75rem 1rem;
+    background: var(--companion-bg);
+    border: 1px solid var(--border);
+    border-radius: 1.125rem;
     align-self: flex-start;
-    margin: 0.75rem 0;
-    width: 100%;
+    margin: 0.4rem 0;
+    width: fit-content;
+    max-width: 95%;
   }
 
   .activity-header {
@@ -1354,5 +1482,50 @@
   @keyframes toast-in {
     from { opacity: 0; transform: translateX(-50%) translateY(-0.5rem); }
     to { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+
+  .scroll-bottom-btn {
+    position: absolute;
+    bottom: 24px;
+    right: 24px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--gold);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+    transition: all 0.2s ease;
+    animation: bounceIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .scroll-bottom-btn:hover {
+    background: var(--bg-hover);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+    color: var(--gold-bright);
+  }
+
+  .scroll-bottom-btn:active {
+    transform: translateY(0);
+  }
+
+  @keyframes bounceIn {
+    from { opacity: 0; transform: scale(0.5) translateY(20px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  @media (max-width: 768px) {
+    .scroll-bottom-btn {
+      bottom: 100px; /* Adjust for input area */
+      right: 16px;
+      width: 40px;
+      height: 40px;
+    }
   }
 </style>
