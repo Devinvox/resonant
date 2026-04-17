@@ -447,11 +447,11 @@ function handleMessage(event: MessageEvent) {
         canvases = canvases.map(c =>
           c.id === msg.canvasId
             ? {
-                ...c,
-                content: msg.content,
-                title: msg.title ?? c.title,
-                updated_at: msg.updatedAt,
-              }
+              ...c,
+              content: msg.content,
+              title: msg.title ?? c.title,
+              updated_at: msg.updatedAt,
+            }
             : c
         );
         break;
@@ -648,6 +648,9 @@ export function send(msg: ClientMessage) {
 
 export async function loadThread(threadId: string) {
   activeThreadId = threadId;
+  // Clear stale streaming state when loading/switching threads
+  streamingMessageId = null;
+  streamingTokens = '';
   try {
     const response = await fetch(`/api/threads/${threadId}/messages`);
     if (!response.ok) throw new Error('Failed to load messages');
@@ -659,7 +662,7 @@ export async function loadThread(threadId: string) {
     }
     // Mark as read (best-effort — don't block thread loading if WS is down)
     if (messages.length > 0) {
-      try { send({ type: 'read', threadId, beforeId: messages[messages.length - 1].id }); } catch {}
+      try { send({ type: 'read', threadId, beforeId: messages[messages.length - 1].id }); } catch { }
     }
   } catch (err) {
     console.error('Failed to load thread:', err);

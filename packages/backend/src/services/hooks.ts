@@ -17,8 +17,8 @@ import { logToolUse } from './audit.js';
 import { saveFile, saveFileFromBase64, saveFileInternal, getContentTypeFromMime } from './files.js';
 import { getResonantConfig } from '../config.js';
 import crypto from 'crypto';
-import { existsSync, readFileSync, readdirSync } from 'fs';
-import { basename, join } from 'path';
+import { existsSync, readFileSync, readdirSync, realpathSync } from 'fs';
+import { basename, join, resolve, isAbsolute } from 'path';
 
 // Re-export ConnectionRegistry type from types
 import type { ConnectionRegistry } from '../types.js';
@@ -628,26 +628,27 @@ function safePreToolUse(fn: HookCallback): HookCallback {
 
 function getSafeWritePrefixes(): string[] {
   const config = getResonantConfig();
-  const prefixes: string[] = [];
+  const rawPrefixes: string[] = [];
 
   // Add configured safe write prefixes
-  for (const prefix of config.hooks.safe_write_prefixes) {
-    prefixes.push(prefix);
-    // Add both slash variants for Windows compatibility
-    if (prefix.includes('/')) {
-      prefixes.push(prefix.replace(/\//g, '\\'));
-    } else if (prefix.includes('\\')) {
-      prefixes.push(prefix.replace(/\\/g, '/'));
-    }
-  }
+  rawPrefixes.push(...config.hooks.safe_write_prefixes);
 
   // Always allow agent cwd
-  const cwd = config.agent.cwd;
-  if (cwd) {
-    const normalized = cwd.replace(/\\/g, '/');
-    const trailed = normalized.endsWith('/') ? normalized : normalized + '/';
-    prefixes.push(trailed);
-    prefixes.push(trailed.replace(/\//g, '\\'));
+  if (config.agent.cwd) {
+    rawPrefixes.push(config.agent.cwd);
+  }
+
+  const prefixes: string[] = [];
+  for (const p of rawPrefixes) {
+    try {
+      const abs = resolve(config.agent.cwd, p);
+      const normalized = abs.replace(/\\/g, '/');
+      const trailed = normalized.endsWith('/') ? normalized : normalized + '/';
+      prefixes.push(trailed);
+      prefixes.push(trailed.replace(/\//g, '\\'));
+    } catch {
+      // bad path, ignore
+    }
   }
 
   return prefixes;
@@ -720,12 +721,15 @@ function buildPreToolUse(ctx: HookContext): HookCallback {
 
     // --- Security: File writes outside safe prefixes ---
     if ((rawToolName === 'Write' || rawToolName === 'Edit') && toolInput?.file_path) {
-      const filePath = String(toolInput.file_path);
+      const config = getResonantConfig();
+      const rawPath = String(toolInput.file_path);
+      const resolvedPath = resolve(config.agent.cwd, rawPath);
       const safePrefixes = getSafeWritePrefixes();
+
       if (safePrefixes.length > 0) {
-        const inWorkspace = safePrefixes.some(prefix => filePath.startsWith(prefix));
+        const inWorkspace = safePrefixes.some(prefix => resolvedPath.startsWith(prefix));
         if (!inWorkspace) {
-          console.warn(`[Hook] BLOCKED file write outside workspace: ${filePath}`);
+          console.warn(`[Hook] BLOCKED file write outside workspace: ${resolvedPath} (raw: ${rawPath})`);
           return {
             continue: true,
             hookSpecificOutput: {
@@ -928,7 +932,10 @@ const SKILLS_CACHE_MS = 60 * 1000; // Re-scan every 60s
 /** Scan skills directory and return structured data. Used by commands.ts for registry. */
 export function scanSkills(): SkillInfo[] {
   const config = getResonantConfig();
-  const skillsDir = join(config.agent.cwd, '.claude', 'skills');
+  let skillsDir = join(config.agent.cwd, '.agents', 'skills');
+  if (!existsSync(skillsDir)) {
+    skillsDir = join(config.agent.cwd, '.claude', 'skills');
+  }
 
   if (skillsStructuredCache && (Date.now() - skillsStructuredCache.scannedAt) < SKILLS_CACHE_MS) {
     return skillsStructuredCache.skills;
@@ -998,12 +1005,14 @@ function scanSkillSummaries(): string {
 // Skills summary, chat tools, telegram tools — sent once, never in history
 // ---------------------------------------------------------------------------
 
-export function buildStaticContext(platform?: 'web' | 'discord' | 'telegram' | 'api'): string {
+export function buildStaticContext(platform?: 'web' | 'discord' | 'telegram' | 'api', chatMode = false): string {
   const config = getResonantConfig();
   const parts: string[] = [];
 
-  const skillsSummary = scanSkillSummaries();
-  if (skillsSummary) parts.push(skillsSummary);
+  if (!chatMode) {
+    const skillsSummary = scanSkillSummaries();
+    if (skillsSummary) parts.push(skillsSummary);
+  }
 
   const agentCwd = config.agent.cwd.replace(/\\/g, '/');
   const cliPath = join(agentCwd, 'tools', 'sc.mjs');

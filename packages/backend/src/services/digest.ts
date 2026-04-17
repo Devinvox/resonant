@@ -86,8 +86,8 @@ export async function runDigest(agent: AgentService): Promise<void> {
 
   const config = getResonantConfig();
 
-  // Read messages since last digest
-  const lastSeq = parseInt(getConfig('digest.last_sequence') || '0');
+  // Read messages since last digest (per-thread to handle sequence reset)
+  const lastSeq = parseInt(getConfig(`digest.last_sequence.${thread.id}`) || '0');
   const messages = getDb().prepare(
     `SELECT role, content, created_at FROM messages WHERE thread_id = ? AND sequence > ? AND deleted_at IS NULL AND content_type = 'text' ORDER BY sequence ASC`
   ).all(thread.id, lastSeq) as Array<{ role: string; content: string; created_at: string }>;
@@ -175,8 +175,8 @@ Write the digest block for this conversation. Remember: output ONLY the markdown
     }
     appendFileSync(digestPath, digestContent.trim() + '\n\n---\n\n');
 
-    // Update last processed sequence
-    setConfig('digest.last_sequence', String(maxSeq.seq));
+    // Update last processed sequence (per-thread)
+    setConfig(`digest.last_sequence.${thread.id}`, String(maxSeq.seq));
 
     dlog(`Digest written to ${digestPath} (${digestContent.length} chars)`);
   } catch (err: any) {

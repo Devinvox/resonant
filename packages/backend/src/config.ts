@@ -27,6 +27,7 @@ export interface ResonantConfig {
     cwd: string;
     claude_md_path: string;
     mcp_json_path: string;
+    mcp_servers?: Record<string, any>;
     model: string;
     model_autonomous: string;
   };
@@ -153,7 +154,7 @@ function deepMerge(target: Record<string, unknown>, source: Record<string, unkno
   const result = { ...target };
   for (const key of Object.keys(source)) {
     if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) &&
-        target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
+      target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
       result[key] = deepMerge(target[key] as Record<string, unknown>, source[key] as Record<string, unknown>);
     } else {
       result[key] = source[key];
@@ -170,10 +171,10 @@ export function loadConfig(configPath?: string): ResonantConfig {
   const searchPaths = configPath
     ? [configPath]
     : [
-        join(PROJECT_ROOT, 'resonant.yaml'),
-        join(PROJECT_ROOT, 'resonant.yml'),
-        join(PROJECT_ROOT, 'config', 'resonant.yaml'),
-      ];
+      join(PROJECT_ROOT, 'resonant.yaml'),
+      join(PROJECT_ROOT, 'resonant.yml'),
+      join(PROJECT_ROOT, 'config', 'resonant.yaml'),
+    ];
 
   let fileConfig: Record<string, unknown> = {};
 
@@ -217,4 +218,9 @@ export function loadConfig(configPath?: string): ResonantConfig {
 export function getResonantConfig(): ResonantConfig {
   if (!_config) throw new Error('Config not loaded. Call loadConfig() first.');
   return _config;
+}
+
+export function reloadConfig(): ResonantConfig {
+  _config = null;
+  return loadConfig();
 }

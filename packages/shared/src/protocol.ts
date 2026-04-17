@@ -75,7 +75,7 @@ export type ServerMessage =
   | { type: 'system_status'; status: SystemStatus }
   | { type: 'thread_deleted'; threadId: string }
   | { type: 'thread_updated'; thread: ThreadSummary }
-  | { type: 'context_usage'; percentage: number; tokensUsed: number; contextWindow: number }
+  | { type: 'context_usage'; percentage: number; tokensUsed: number; contextWindow: number; sessionTotalTokens?: number }
   | { type: 'compaction_notice'; preTokens: number; message: string; isComplete: boolean }
   | { type: 'canvas_created'; canvas: Canvas }
   | { type: 'canvas_updated'; canvasId: string; content: string; updatedAt: string; title?: string }

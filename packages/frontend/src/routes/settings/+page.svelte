@@ -19,6 +19,7 @@
   import { send, getConnectionState } from '$lib/stores/websocket.svelte';
 
   let activeTab = $state<'preferences' | 'orchestrator' | 'system' | 'mcp' | 'skills' | 'notifications' | 'discord' | 'sessions'>('preferences');
+  let mobileView = $state<'nav' | 'content'>('nav');
   let systemStatus = $derived(getSystemStatus());
   let loading = $derived(isLoading());
   let connectionState = $derived(getConnectionState());
@@ -83,7 +84,7 @@
   <button class="settings-backdrop" onclick={closeSettings} aria-label="Close settings"></button>
 
   <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
-    <aside class="settings-sidebar">
+    <aside class="settings-sidebar" class:hide-mobile={mobileView === 'content'}>
       <div class="settings-sidebar-header">
         <a href="/chat" class="back-link">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -103,7 +104,7 @@
           <button
             class="settings-nav-item"
             class:active={activeTab === section.id}
-            onclick={() => activeTab = section.id}
+            onclick={() => { activeTab = section.id; mobileView = 'content'; }}
           >
             <span class="settings-nav-label">{section.label}</span>
             <span class="settings-nav-desc">{section.desc}</span>
@@ -112,12 +113,20 @@
       </nav>
     </aside>
 
-    <div class="settings-content">
+    <div class="settings-content" class:hide-mobile={mobileView === 'nav'}>
       <header class="settings-content-header">
-        <div class="settings-section-copy">
-          <span class="settings-eyebrow">Current section</span>
-          <h2>{sections.find(s => s.id === activeTab)?.label}</h2>
-          <p>{sections.find(s => s.id === activeTab)?.desc}</p>
+        <div class="settings-content-header-inner">
+          <button class="mobile-back-btn" onclick={() => mobileView = 'nav'} aria-label="Back to menu">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+            Menu
+          </button>
+          <div class="settings-section-copy">
+            <span class="settings-eyebrow">Current section</span>
+            <h2>{sections.find(s => s.id === activeTab)?.label}</h2>
+            <p>{sections.find(s => s.id === activeTab)?.desc}</p>
+          </div>
         </div>
         <button class="settings-close" onclick={closeSettings}>Close</button>
       </header>
@@ -405,7 +414,15 @@
     font-size: 0.875rem;
   }
 
+  .mobile-back-btn {
+    display: none;
+  }
+
   @media (max-width: 900px) {
+    .hide-mobile {
+      display: none !important;
+    }
+
     .settings-overlay {
       padding: 0;
       align-items: stretch;
@@ -423,13 +440,11 @@
 
     .settings-sidebar {
       border-right: none;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-      padding: calc(env(safe-area-inset-top, 0px) + 0.5rem) 0.8rem 0.45rem;
-      gap: 0.45rem;
-      background:
-        linear-gradient(180deg, var(--bg-hover), transparent 24%),
-        var(--bg-primary);
+      flex: 1;
+      border-bottom: none;
+      padding: calc(env(safe-area-inset-top, 0px) + 0.5rem) 1rem 1rem;
+      gap: 0.75rem;
+      background: var(--bg-primary);
     }
 
     .settings-sidebar-header {
@@ -456,7 +471,7 @@
 
     .settings-kicker h1 {
       margin-top: 0;
-      font-size: 0.95rem;
+      font-size: 1.15rem;
     }
 
     .settings-kicker p {
@@ -464,63 +479,83 @@
     }
 
     .settings-nav {
-      flex-direction: row;
-      flex-shrink: 0;
-      align-items: center;
-      gap: 0.35rem;
-      overflow-x: auto;
-      overflow-y: hidden;
+      flex-direction: column;
+      flex-shrink: 1;
+      align-items: stretch;
+      gap: 0.5rem;
+      overflow-x: hidden;
+      overflow-y: auto;
       padding-right: 0;
-      padding-bottom: 0.05rem;
-      scrollbar-width: none;
+      padding-bottom: 2rem;
     }
 
     .settings-nav-item {
-      min-width: 6.5rem;
-      flex: 0 0 auto;
-      flex-direction: row;
-      align-items: center;
-      gap: 0.4rem;
-      justify-content: center;
-      min-height: 38px;
-      padding: 0.5rem 0.8rem;
-      border-radius: 999px;
-      flex-shrink: 0;
-      border-color: var(--border);
-      background: var(--bg-hover);
-      color: var(--text-primary);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.01);
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.25rem;
+      min-height: 48px;
+      padding: 0.85rem 1rem;
+      border-radius: 1rem;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
     }
 
     .settings-nav-label {
-      white-space: nowrap;
-      font-size: 0.8rem;
+      white-space: normal;
+      font-size: 0.95rem;
     }
 
     .settings-nav-desc {
-      display: none;
+      display: block;
+      font-size: 0.8rem;
+      opacity: 0.65;
     }
 
     .settings-nav-item.active {
-      background: rgba(94, 171, 165, 0.22);
-      border-color: rgba(94, 171, 165, 0.3);
+      background: var(--bg-hover);
+      border-color: var(--border-hover);
       color: var(--text-primary);
     }
 
     .settings-content {
-      gap: 0.75rem;
-      padding: 0.8rem;
+      gap: 0.85rem;
+      padding: calc(env(safe-area-inset-top, 0px) + 0.5rem) 0.8rem 0.8rem;
       min-height: 0;
     }
 
     .settings-content-header {
       gap: 0.65rem;
       padding-bottom: 0.7rem;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .settings-content-header-inner {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .mobile-back-btn {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      background: transparent;
+      padding: 0.25rem 0;
+      margin-bottom: 0.5rem;
+      transition: color 0.15s;
+    }
+
+    .mobile-back-btn:hover {
+      color: var(--text-primary);
     }
 
     .settings-content-header h2 {
-      margin-top: 0.05rem;
-      font-size: 1.05rem;
+      margin-top: 0;
+      font-size: 1.15rem;
     }
 
     .settings-content-header p {
@@ -559,7 +594,7 @@
 
   @media (max-width: 640px) {
     .settings-sidebar {
-      padding: calc(env(safe-area-inset-top, 0px) + 0.45rem) 0.65rem 0.4rem;
+      padding: calc(env(safe-area-inset-top, 0px) + 0.45rem) 0.85rem 0.4rem;
     }
 
     .settings-nav {

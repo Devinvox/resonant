@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Message, CommandRegistryEntry } from '@resonant/shared';
+  import { tick } from 'svelte';
   import VoiceRecorder from './VoiceRecorder.svelte';
   import VoiceModeToggle from './VoiceModeToggle.svelte';
   import { getCompanionName } from '$lib/stores/settings.svelte';
@@ -21,6 +22,7 @@
     replyTo = null,
     isStreaming = false,
     activeThreadId = null,
+    editDraft = { text: '', ts: 0 },
     onbatchsend,
     oncancelreply,
     onstop,
@@ -28,6 +30,7 @@
     replyTo?: Message | null;
     isStreaming?: boolean;
     activeThreadId?: string | null;
+    editDraft?: { text: string; ts: number };
     onbatchsend?: (text: string, files: FileUploadResult[], prosody?: Record<string, number>) => void;
     oncancelreply?: () => void;
     onstop?: () => void;
@@ -40,6 +43,20 @@
   let uploadError = $state<string | null>(null);
   let pendingAttachments = $state<FileUploadResult[]>([]);
   let pendingProsody = $state<Record<string, number> | null>(null);
+
+  // When editDraft changes from parent, fill textarea
+  $effect(() => {
+    if (editDraft && typeof editDraft === 'object' && editDraft.text && editDraft.ts > 0) {
+      const text = String(editDraft.text);
+      if (text !== '[object Object]') {
+        content = text;
+        tick().then(() => { 
+          textarea?.focus();
+          autoResize();
+        });
+      }
+    }
+  });
 
   // Command palette state
   let showCommandPalette = $state(false);
@@ -159,7 +176,25 @@
       if (handled) return;
     }
 
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter') {
+      const isMobile = typeof window !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      
+      if (isMobile) {
+        if (e.shiftKey) {
+          // Mobile Shift+Enter: Send
+          e.preventDefault();
+          handleSend();
+        }
+        // Mobile Enter (no shift): newline (default)
+        return;
+      }
+
+      if (e.shiftKey) {
+        // Desktop Shift+Enter: newline (default)
+        return;
+      }
+
+      // Desktop Enter (no shift): Send message
       e.preventDefault();
       handleSend();
     }
@@ -295,76 +330,86 @@
     />
   {/if}
 
-  <div class="input-bar">
-    <input
-      bind:this={fileInput}
-      type="file"
-      accept="image/*,audio/*,.pdf,.txt,.md,.json"
-      multiple
-      onchange={handleFileSelect}
-      hidden
-      aria-hidden="true"
-    />
-
-    <button
-      class="attach-button"
-      onclick={() => fileInput?.click()}
-      disabled={uploading}
-      aria-label="Attach file"
-      title="Attach file"
-    >
-      {#if uploading}
-        <span class="upload-spinner"></span>
-      {:else}
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/>
-        </svg>
-      {/if}
-    </button>
-
-    <VoiceRecorder ontranscript={handleTranscript} />
-
+  <div class="input-card">
     <textarea
       bind:this={textarea}
       bind:value={content}
       oninput={handleInput}
       onkeydown={handleKeydown}
       onpaste={handlePaste}
-      placeholder="Type a message..."
+      placeholder="Message Resonant..."
       rows="1"
       aria-label="Message input"
     ></textarea>
 
-    <VoiceModeToggle />
+    <div class="input-actions">
+      <div class="actions-left">
+        <input
+          bind:this={fileInput}
+          type="file"
+          accept="image/*,audio/*,.pdf,.txt,.md,.json"
+          multiple
+          onchange={handleFileSelect}
+          hidden
+          aria-hidden="true"
+        />
 
-    {#if isStreaming}
-      <button
-        class="send-button stop-active"
-        onclick={() => onstop?.()}
-        aria-label="Stop generation"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <rect x="4" y="4" width="16" height="16" rx="2"/>
-        </svg>
-      </button>
-    {:else}
-      <button
-        class="send-button"
-        onclick={handleSend}
-        disabled={!canSend}
-        aria-label="Send message"
-      >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
-        </svg>
-      </button>
-    {/if}
+        <button
+          class="icon-button"
+          onclick={() => fileInput?.click()}
+          disabled={uploading}
+          aria-label="Attach file"
+          title="Attach file"
+        >
+          {#if uploading}
+            <span class="upload-spinner"></span>
+          {:else}
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+            </svg>
+          {/if}
+        </button>
+
+        <VoiceRecorder ontranscript={handleTranscript} />
+        <VoiceModeToggle />
+      </div>
+
+      <div class="actions-right">
+        {#if isStreaming}
+          <button
+            class="send-button stop-active"
+            onclick={() => onstop?.()}
+            aria-label="Stop generation"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="4" y="4" width="16" height="16" rx="2"/>
+            </svg>
+          </button>
+        {:else}
+          <button
+            class="send-button"
+            onclick={handleSend}
+            disabled={!canSend}
+            aria-label="Send message"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </button>
+        {/if}
+      </div>
+    </div>
   </div>
 
   <div class="composer-hint">
     <span>/ for commands</span>
-    <span>Enter to send</span>
-    <span>Shift+Enter for a newline</span>
+    {#if typeof window !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)}
+      <span>Enter for newline</span>
+      <span>Shift+Enter to send</span>
+    {:else}
+      <span>Enter to send</span>
+      <span>Shift+Enter for newline</span>
+    {/if}
   </div>
 </div>
 
@@ -502,41 +547,89 @@
     background: rgba(239, 68, 68, 0.8);
   }
 
-  .input-bar {
+  .input-card {
     display: flex;
-    align-items: flex-end;
-    gap: 0.5rem;
-    padding: 0.65rem 0.7rem;
+    flex-direction: column;
     background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 1.5rem;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
+    border: none;
+    border-radius: 1.125rem;
+    box-shadow: none;
+    padding: 0.5rem 0.625rem 0.5rem;
+    gap: 0.35rem;
+    transition: all var(--transition);
   }
 
-  .input-bar:focus-within {
-    border-color: rgba(94, 171, 165, 0.35);
-    box-shadow: 0 0 0 1px rgba(94, 171, 165, 0.18), 0 16px 40px rgba(0, 0, 0, 0.18);
+  .input-card:focus-within {
+    box-shadow: none !important;
+    border: none !important;
+    outline: none !important;
   }
 
-  .attach-button {
-    width: 2.75rem;
-    height: 2.75rem;
+  textarea:focus, textarea:focus-visible {
+    outline: none !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+
+  textarea {
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0.4rem 0.25rem;
+    color: var(--text-primary);
+    font-size: 1rem;
+    line-height: 1.6;
+    resize: none;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  textarea:focus {
+    outline: none;
+  }
+
+  textarea::placeholder {
+    color: var(--text-muted);
+  }
+
+  .input-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .actions-left {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .actions-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  .icon-button {
+    width: 2.25rem;
+    height: 2.25rem;
     padding: 0;
     color: var(--text-muted);
-    border-radius: 0.875rem;
+    border-radius: 0.5rem;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: color var(--transition), background var(--transition);
+    transition: all var(--transition);
   }
 
-  .attach-button:hover:not(:disabled) {
+  .icon-button:hover:not(:disabled) {
     color: var(--text-secondary);
     background: var(--bg-hover);
   }
 
-  .attach-button:disabled {
+  .icon-button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
@@ -554,36 +647,13 @@
     to { transform: rotate(360deg); }
   }
 
-  textarea {
-    flex: 1;
-    min-width: 0;
-    background: transparent;
-    border: none;
-    border-radius: 0;
-    padding: 0.6rem 0.75rem;
-    color: var(--text-primary);
-    font-size: 1rem;
-    line-height: 1.6;
-    resize: none;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  textarea:focus {
-    outline: none;
-  }
-
-  textarea::placeholder {
-    color: var(--text-muted);
-  }
-
   .send-button {
-    width: 2.75rem;
-    height: 2.75rem;
+    width: 2.25rem;
+    height: 2.25rem;
     padding: 0;
-    background: var(--accent);
-    color: white;
-    border-radius: 0.875rem;
+    background: var(--text-primary);
+    color: var(--bg-primary);
+    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -592,11 +662,13 @@
   }
 
   .send-button:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: var(--accent);
+    color: white;
   }
 
   .send-button:disabled {
-    opacity: 0.25;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
     cursor: not-allowed;
   }
 
@@ -607,7 +679,6 @@
 
   .send-button.stop-active:hover {
     background: #dc2626;
-    box-shadow: 0 0 12px rgba(239, 68, 68, 0.3);
   }
 
   .composer-hint {
@@ -622,22 +693,12 @@
   }
 
   @media (max-width: 768px) {
-    .input-bar {
-      padding: 0.55rem 0.6rem;
-      gap: 0.375rem;
-      border-radius: 1.25rem;
+    .input-card {
+      padding: 0.375rem 0.5rem 0.375rem;
     }
-
-    .attach-button,
-    .send-button {
-      width: 2.5rem;
-      height: 2.5rem;
-    }
-
     textarea {
-      padding: 0.625rem 0.75rem;
+      padding: 0.5rem 0.25rem;
     }
-
     .composer-hint {
       justify-content: flex-start;
       gap: 0.35rem 0.75rem;

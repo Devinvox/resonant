@@ -1,13 +1,13 @@
 import { query, AbortError, listSessions, type Options, type Query, type McpServerConfig, type ListSessionsOptions } from '@anthropic-ai/claude-agent-sdk';
 import type { McpServerInfo } from '@resonant/shared';
-import { createMessage, updateThreadSession, getThread, updateThreadActivity, createSessionRecord, endSessionRecord, getConfig } from './db.js';
+import { createMessage, updateThreadSession, getThread, updateThreadActivity, createSessionRecord, endSessionRecord, getConfig, getConfigBool } from './db.js';
 import { registry } from './ws.js';
 import { createHooks, buildOrientationContext, buildStaticContext, type HookContext, type ToolInsertion } from './hooks.js';
 import type { MessageSegment } from '@resonant/shared';
 import type { PushService } from './push.js';
 import { getResonantConfig } from '../config.js';
 import crypto from 'crypto';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 
 // Lazy-init: config isn't available at import time — defer until first use
@@ -22,7 +22,7 @@ function ensureInit() {
   const config = getResonantConfig();
   AGENT_CWD = config.agent.cwd;
 
-  // Load CLAUDE.md
+  // Load CLAUDE.md for the system prompt
   const candidates = [
     config.agent.claude_md_path,
     join(AGENT_CWD, '.claude/CLAUDE.md'),
@@ -39,25 +39,34 @@ function ensureInit() {
     }
   }
 
-  // Load .mcp.json
-  const mcpJsonPath = config.agent.mcp_json_path;
-  if (existsSync(mcpJsonPath)) {
-    try {
-      const mcpJson = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'));
-      if (mcpJson.mcpServers) {
-        for (const [name, mcpCfg] of Object.entries(mcpJson.mcpServers) as [string, any][]) {
-          if (mcpCfg.type === 'url' || mcpCfg.type === 'http') {
-            mcpServersFromConfig[name] = { type: 'http', url: mcpCfg.url, headers: mcpCfg.headers };
-          } else if (mcpCfg.type === 'sse') {
-            mcpServersFromConfig[name] = { type: 'sse', url: mcpCfg.url, headers: mcpCfg.headers };
-          } else if (!mcpCfg.type || mcpCfg.type === 'stdio') {
-            mcpServersFromConfig[name] = { command: mcpCfg.command, args: mcpCfg.args, env: mcpCfg.env };
-          }
-        }
-        console.log(`Loaded ${Object.keys(mcpServersFromConfig).length} MCP servers from .mcp.json: ${Object.keys(mcpServersFromConfig).join(', ')}`);
+  // Load MCP Servers
+  const processMcpConfig = (servers: Record<string, any>, source: string) => {
+    for (const [name, mcpCfg] of Object.entries(servers)) {
+      if (mcpCfg.type === 'url' || mcpCfg.type === 'http') {
+        mcpServersFromConfig[name] = { type: 'http', url: mcpCfg.url, headers: mcpCfg.headers };
+      } else if (mcpCfg.type === 'sse') {
+        mcpServersFromConfig[name] = { type: 'sse', url: mcpCfg.url, headers: mcpCfg.headers };
+      } else if (!mcpCfg.type || mcpCfg.type === 'stdio') {
+        mcpServersFromConfig[name] = { command: mcpCfg.command, args: mcpCfg.args, env: mcpCfg.env };
       }
-    } catch (err) {
-      console.warn('Failed to load .mcp.json:', err instanceof Error ? err.message : err);
+    }
+    console.log(`Loaded ${Object.keys(mcpServersFromConfig).length} MCP servers from ${source}: ${Object.keys(mcpServersFromConfig).join(', ')}`);
+  };
+
+  if (config.agent.mcp_servers && Object.keys(config.agent.mcp_servers).length > 0) {
+    processMcpConfig(config.agent.mcp_servers, 'resonant.yaml config');
+  } else {
+    // Fallback: Load .mcp.json
+    const mcpJsonPath = config.agent.mcp_json_path;
+    if (existsSync(mcpJsonPath)) {
+      try {
+        const mcpJson = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'));
+        if (mcpJson.mcpServers) {
+          processMcpConfig(mcpJson.mcpServers, '.mcp.json');
+        }
+      } catch (err) {
+        console.warn('Failed to load .mcp.json:', err instanceof Error ? err.message : err);
+      }
     }
   }
 }
@@ -87,6 +96,7 @@ let presenceStatus: 'active' | 'dormant' | 'waking' | 'offline' = 'offline';
 // Context window tracking
 let contextTokensUsed = 0;
 let contextWindowSize = 0;
+let sessionTotalTokensUsed = 0; // Accumulates over entire session
 
 // Active query tracking (for abort, MCP control, rewind)
 let activeAbortController: AbortController | null = null;
@@ -280,8 +290,8 @@ export class AgentService {
     return cachedMcpStatus;
   }
 
-  getContextUsage(): { tokensUsed: number; contextWindow: number } {
-    return { tokensUsed: contextTokensUsed, contextWindow: contextWindowSize };
+  getContextUsage(): { tokensUsed: number; contextWindow: number; sessionTotalTokens: number } {
+    return { tokensUsed: contextTokensUsed, contextWindow: contextWindowSize, sessionTotalTokens: sessionTotalTokensUsed };
   }
 
   stopGeneration(): boolean {
@@ -420,7 +430,7 @@ export class AgentService {
     let currentThinkingAccum = '';
 
     // Build hook context
-    const platform = platformOpts?.platform || 'web';
+    const platform = platformOpts?.platform || (isAutonomous ? 'api' : 'web');
     const hookContext: HookContext = {
       threadId,
       threadName: threadMeta?.name ?? thread.name,
@@ -445,9 +455,19 @@ export class AgentService {
     const model = isAutonomous
       ? interactiveModel // User requested routines to follow the actively selected interactive model
       : interactiveModel;
+
+    // Determine chat mode (defaulting to true to save tokens unless requested otherwise)
+    const chatMode = getConfigBool('agent.chat_mode', true);
+
     // Build system prompt: CLAUDE.md + static tools (sent once, not in message history)
-    const staticCtx = buildStaticContext(platform);
-    const systemAppend = [claudeMdContent, staticCtx].filter(Boolean).join('\n\n');
+    const staticCtx = buildStaticContext(platform, chatMode);
+
+    // If chat mode is enabled, supply a very minimal prompt instead of the full CLAUDE.md to save context
+    const baseMdContext = chatMode
+      ? `You are ${cfg.identity.companion_name}. You are in chat mode (no dev SDK tools, just MCP and internal tools). Follow your identity and rules.`
+      : claudeMdContent;
+
+    const systemAppend = [baseMdContext, staticCtx].filter(Boolean).join('\n\n');
 
     const options: Options = {
       model,
@@ -465,13 +485,25 @@ export class AgentService {
       // Plugin: native skill discovery from .claude/skills/
       plugins: [{ type: 'local' as const, path: join(AGENT_CWD, '.claude').replace(/\\/g, '/') }],
       // Explicitly pass MCP servers — SDK isolation mode doesn't auto-discover .mcp.json
-      ...(Object.keys(mcpServersFromConfig).length > 0 && { mcpServers: mcpServersFromConfig }),
+      mcpServers: Object.entries(mcpServersFromConfig).reduce((acc, [name, cfg]) => {
+        // Skip resonant-mind tool definitions when on Web to avoid duplication with official Claude.ai MIND
+        if (platform === 'web' && name === 'resonant-mind') return acc;
+        acc[name] = cfg;
+        return acc;
+      }, {} as Record<string, McpServerConfig>),
     };
+
+    const disallowedTools: string[] = [];
+
+    // In chat mode, disable heavy Claude Code tools, but leave 'Bash' (needed for SC commands)
+    if (chatMode) {
+      const claudeCodeToolsToDisable = ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Agent', 'NotebookEdit', 'TodoWrite'];
+      disallowedTools.push(...claudeCodeToolsToDisable);
+    }
 
     // Apply persistent disabled servers as disallowedTools
     const disabledServers = loadDisabledServers();
     if (disabledServers.length > 0 && cachedMcpStatus.length > 0) {
-      const disallowedTools: string[] = [];
       for (const serverName of disabledServers) {
         const server = cachedMcpStatus.find(s => s.name === serverName);
         if (server?.tools) {
@@ -480,8 +512,9 @@ export class AgentService {
           }
         }
       }
-      if (disallowedTools.length > 0) options.disallowedTools = disallowedTools;
     }
+
+    if (disallowedTools.length > 0) options.disallowedTools = disallowedTools;
 
     // Resume existing session if available
     if (thread.current_session_id) {
@@ -571,6 +604,8 @@ export class AgentService {
       };
 
       // Block until MCP servers are ready on first message of session
+      if (isFirstMessage) sessionTotalTokensUsed = 0; // Reset session tracking
+
       // (ensures Mind and other tools are available from the first turn)
       // After first message, servers are already connected — non-blocking refresh
       if (isFirstMessage || (isAutonomous && cachedMcpStatus.length === 0)) {
@@ -664,17 +699,20 @@ export class AgentService {
                   }
                 }
               } else if (usage.input_tokens) {
-                contextTokensUsed = usage.input_tokens + (usage.output_tokens || 0);
+                const callTokens = usage.input_tokens + (usage.output_tokens || 0);
+                contextTokensUsed = callTokens;
+                sessionTotalTokensUsed += callTokens;
               }
 
               if (contextWindowSize > 0 && contextTokensUsed > 0) {
                 const percentage = Math.round((contextTokensUsed / contextWindowSize) * 100);
-                console.log(`Context usage: ${contextTokensUsed} / ${contextWindowSize} (${percentage}%)`);
+                console.log(`Context usage: ${contextTokensUsed} / ${contextWindowSize} (${percentage}%) [Session: ${sessionTotalTokensUsed}]`);
                 registry.broadcast({
                   type: 'context_usage',
                   percentage,
                   tokensUsed: contextTokensUsed,
                   contextWindow: contextWindowSize,
+                  sessionTotalTokens: sessionTotalTokensUsed,
                 });
               }
             }

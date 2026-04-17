@@ -188,9 +188,21 @@ app.post('/api/llm-proxy/*', async (req, res) => {
       }
 
       // Also guard system prompt just in case
-      if (typeof body.system === 'string' && body.system.length > 15000) {
-        console.log(`[LLM Proxy] TRUNCATING massive system prompt (${body.system.length} -> 15000 chars)`);
-        body.system = body.system.slice(0, 15000) + '... [TRUNCATED]';
+      if (typeof body.system === 'string') {
+        if (body.system.length > 500) {
+          // DEBUG: DUMP SYSTEM PROMPT TO FILE FOR ANALYSIS
+          try {
+            fs.writeFileSync('C:\\Users\\Nout\\AI\\resonant\\debug_system_prompt.txt', typeof body.system === 'string' ? body.system : JSON.stringify(body.system, null, 2));
+            console.log(`[LLM Proxy] DUMPED SYSTEM PROMPT TO C:\\Users\\Nout\\AI\\resonant\\debug_system_prompt.txt (${body.system.length} chars)`);
+          } catch (e) {
+            console.error('Failed to dump system prompt:', e);
+          }
+        }
+
+        if (body.system.length > 150000) {
+          console.log(`[LLM Proxy] TRUNCATING massive system prompt (${body.system.length} -> 150000 chars)`);
+          body.system = body.system.slice(0, 150000) + '... [TRUNCATED]';
+        }
       }
 
       const logEntry = {
@@ -439,3 +451,4 @@ process.on('SIGINT', async () => {
     process.exit(0);
   });
 });
+

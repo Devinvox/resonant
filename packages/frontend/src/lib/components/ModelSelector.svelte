@@ -2,16 +2,17 @@
   import { getConfig, updateSetting } from '$lib/stores/settings.svelte';
 
   const MODELS = [
-    { id: 'claude-opus-4-6', label: 'Opus' },
+    { id: 'claude-opus-4-7', label: 'Opus' },
     { id: 'claude-sonnet-4-6', label: 'Sonnet' },
     { id: 'claude-haiku-4-5', label: 'Haiku' },
-    { id: 'glm-5', label: 'GLM 5' },
-    { id: 'glm-5-turbo', label: 'GLM 5 Turbo' },
-    { id: 'glm-4-flash', label: 'GLM Flash (free)' },
+    { id: 'glm-5.1', label: 'GLM 5.1' },
+    { id: 'glm-4.7', label: 'GLM 4.7' },
+    { id: 'glm-4.5-air', label: 'GLM 4.5 Air' },
+    { id: 'glm-4.7-flash', label: 'GLM 4.7 Flash (free)' },
   ] as const;
 
   let config = $derived(getConfig());
-  let currentModel = $derived(config['agent.model'] || 'claude-opus-4-6');
+  let currentModel = $derived(config['agent.model'] || 'claude-opus-4-7');
   let currentLabel = $derived(MODELS.find(m => m.id === currentModel)?.label || currentModel);
 
   let open = $state(false);

@@ -10,7 +10,6 @@ let isInterceptorActive = false;
 
 // AGGRESSIVE: replace entire content with a short marker
 const PRUNE_AGGRESSIVE = new Set([
-    'mind_orient', 'mind_ground', 'mind_surface', 'mind_inner_weather',
     'mind_health', 'mind_patterns', 'mind_consolidate', 'mind_feel_toward',
     'mind_sit', 'mind_resolve', 'mind_store_image',
     'mind_write', 'mind_edit', 'mind_delete',
@@ -20,17 +19,18 @@ const PRUNE_AGGRESSIVE = new Set([
 
 // MEDIUM: keep first N chars + truncation notice
 const PRUNE_MEDIUM = new Set([
-    'Grep', 'Bash',
+    'Grep', 'ls', 'fs_list_files',
     'mind_search', 'mind_read', 'mind_read_entity', 'mind_list_entities',
     'obs_search', 'obs_search_by_tag',
 ]);
-const MEDIUM_KEEP_CHARS = 400;
+const MEDIUM_KEEP_CHARS = 200; // Reduced from 400
 
 // KEEP_WITH_DELAY: keep for first 2 assistant turns after the call, then prune
 const PRUNE_DELAYED = new Set([
-    'Read', 'obs_read_note',
+    'Read', 'obs_read_note', 'Bash',
     'WebFetch', 'WebSearch', 'web_reader',
-    'Agent',
+    'Agent', 'cc_canvas',
+    'mind_orient', 'mind_ground', 'mind_surface', 'mind_inner_weather',
 ]);
 // Everything else: keep as-is (small confirmations, etc.)
 
@@ -55,7 +55,15 @@ function findToolName(messages: any[], toolUseId: string): string {
         const content = Array.isArray(msg.content) ? msg.content : [];
         for (const block of content) {
             if (block.type === 'tool_use' && block.id === toolUseId) {
-                return block.name || '';
+                let name = block.name || '';
+                // Strip SDK MCP prefix (e.g. 'mcp__mind-cloud__mind_read' -> 'mind_read')
+                if (name.startsWith('mcp__')) {
+                    const parts = name.split('__');
+                    if (parts.length >= 3) {
+                        name = parts.slice(2).join('__');
+                    }
+                }
+                return name;
             }
         }
     }
@@ -139,7 +147,7 @@ function collapseErrorChains(messages: any[]): any[] {
 }
 
 // ---------------------------------------------------------------------------
-// Main pruning pass — walk messages and truncate old tool_results
+// Main pruning pass — walk messages and truncate old tool_results and old thinking blocks
 // ---------------------------------------------------------------------------
 function pruneMessages(messages: any[]): { messages: any[]; savedBytes: number; prunedCount: number } {
     let savedBytes = 0;
@@ -148,8 +156,56 @@ function pruneMessages(messages: any[]): { messages: any[]; savedBytes: number; 
     // First: error chain collapse
     const collapsed = collapseErrorChains(messages);
 
-    // Second: selective tool_result pruning
+    // Find the index of the last assistant message to preserve its thinking (if needed)
+    let lastAssistantIdx = -1;
+    for (let i = collapsed.length - 1; i >= 0; i--) {
+        if (collapsed[i].role === 'assistant') {
+            lastAssistantIdx = i;
+            break;
+        }
+    }
+
+    // Second: selective tool_result and thinking block pruning
     const pruned = collapsed.map((msg, msgIdx) => {
+        // Prune older thinking blocks from assistant messages
+        if (msg.role === 'assistant' && msgIdx !== lastAssistantIdx) {
+            let contentChanged = false;
+
+            if (Array.isArray(msg.content)) {
+                const newContent = msg.content.map((block: any) => {
+                    if (block.type === 'thinking') {
+                        const len = (block.thinking || '').length;
+                        if (len > 0) {
+                            savedBytes += len;
+                            prunedCount++;
+                            contentChanged = true;
+                            return { type: 'text', text: '[Thinking pruned for context size]' }; // Replace block or just remove it (returning text is safer for strict APIs)
+                        }
+                    } else if (block.type === 'text' && typeof block.text === 'string') {
+                        const originalLen = block.text.length;
+                        const cleanText = block.text.replace(/<thinking>[\s\S]*?<\/thinking>/g, '[Thinking pruned for context size]');
+                        if (cleanText !== block.text) {
+                            savedBytes += (originalLen - cleanText.length);
+                            prunedCount++;
+                            contentChanged = true;
+                            return { ...block, text: cleanText };
+                        }
+                    }
+                    return block;
+                });
+                if (contentChanged) msg.content = newContent;
+            } else if (typeof msg.content === 'string') {
+                const originalLen = msg.content.length;
+                const cleanText = msg.content.replace(/<thinking>[\s\S]*?<\/thinking>/g, '[Thinking pruned for context size]');
+                if (cleanText !== msg.content) {
+                    savedBytes += (originalLen - cleanText.length);
+                    prunedCount++;
+                    msg.content = cleanText;
+                }
+            }
+            return msg;
+        }
+
         if (msg.role !== 'user') return msg;
         const content = Array.isArray(msg.content) ? msg.content : [];
         if (!content.some((b: any) => b.type === 'tool_result')) return msg;

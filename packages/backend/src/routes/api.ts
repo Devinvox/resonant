@@ -57,7 +57,7 @@ import { embed, vectorToBuffer } from '../services/embeddings.js';
 import { searchVectors, getCacheStats, type SearchFilter } from '../services/vector-cache.js';
 import { saveFile, saveFileInternal, getContentTypeFromMime, getFile, deleteFile, listFiles } from '../services/files.js';
 import { registry } from '../services/ws.js';
-import { getResonantConfig } from '../config.js';
+import { getResonantConfig, reloadConfig, PROJECT_ROOT } from '../config.js';
 import type { Orchestrator } from '../services/orchestrator.js';
 import type { VoiceService } from '../services/voice.js';
 import type { TelegramService } from '../services/telegram/index.js';
@@ -351,12 +351,21 @@ router.post('/internal/canvas', (req, res) => {
 
       res.json({ success: true, canvas });
     } else if (action === 'update') {
-      if (!canvasId || (resolvedContent === '' && !filePath)) {
-        res.status(400).json({ error: 'canvasId and content (or filePath) are required' });
+      if (!canvasId) {
+        res.status(400).json({ error: 'canvasId is required' });
         return;
       }
-      updateCanvasContent(canvasId, resolvedContent, now);
-      registry.broadcast({ type: 'canvas_updated', canvasId, content: resolvedContent, updatedAt: now });
+      // If content is undefined, don't wipe it — only update if content is explicitly provided
+      if (content !== undefined) {
+        // Safety guard: Don't allow wiping significant content with an empty string
+        const existing = getCanvas(canvasId);
+        if (content === '' && existing && existing.content && existing.content.length > 100) {
+          console.warn(`[API] Blocked suspicious empty update for canvas ${canvasId}`);
+        } else {
+          updateCanvasContent(canvasId, content, now);
+          registry.broadcast({ type: 'canvas_updated', canvasId, content: content, updatedAt: now });
+        }
+      }
       res.json({ success: true });
     } else {
       res.status(400).json({ error: 'Unknown action. Use "create" or "update".' });
@@ -861,7 +870,7 @@ router.use(authMiddleware);
 
 function findConfigPath(): string | null {
   for (const name of ['resonant.yaml', 'resonant.yml']) {
-    const p = resolve(name);
+    const p = resolve(PROJECT_ROOT, name);
     if (existsSync(p)) return p;
   }
   return null;
@@ -957,8 +966,9 @@ router.put('/preferences', (req, res) => {
     // Write back
     const newYaml = yaml.dump(parsed, { lineWidth: -1, quotingType: '"', forceQuotes: true });
     writeFileSync(configPath, newYaml, 'utf-8');
+    reloadConfig();
 
-    res.json({ success: true, message: 'Preferences saved. Restart server for some changes to take effect.' });
+    res.json({ success: true, message: 'Preferences saved.' });
   } catch (err) {
     console.error('Failed to save preferences:', err);
     res.status(500).json({ error: 'Failed to save preferences' });
@@ -1436,6 +1446,7 @@ router.get('/audit', (req, res) => {
 });
 
 // Agent sessions (via SDK listSessions)
+
 router.get('/sessions', async (req, res) => {
   try {
     const { limit } = req.query;
@@ -1499,7 +1510,11 @@ router.get('/skills', (req, res) => {
   try {
     const config = getResonantConfig();
     const agentCwd = config.agent.cwd;
-    const skillsDir = join(agentCwd, '.claude', 'skills');
+
+    let skillsDir = join(agentCwd, '.agents', 'skills');
+    if (!existsSync(skillsDir)) {
+      skillsDir = join(agentCwd, '.claude', 'skills');
+    }
 
     if (!existsSync(skillsDir)) {
       res.json({ skills: [] });
@@ -1517,7 +1532,7 @@ router.get('/skills', (req, res) => {
       const content = readFileSync(skillFile, 'utf-8');
 
       // Parse YAML frontmatter
-      const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
       if (!fmMatch) continue;
 
       const fm = fmMatch[1];

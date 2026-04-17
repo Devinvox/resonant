@@ -38,13 +38,15 @@ export function loadVectorCache(): void {
     role: string; created_at: string; thread_name: string;
   }>;
 
-  const count = rows.length;
+  const validRows = rows.filter(r => r.vector && r.vector.buffer);
+  const count = validRows.length;
+
   vectors = new Float32Array(count * EMBEDDING_DIM);
   metadata = new Array(count);
   messageIndex = new Map();
 
   for (let i = 0; i < count; i++) {
-    const row = rows[i];
+    const row = validRows[i];
     const buf = row.vector;
     const f32 = new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
     vectors.set(f32, i * EMBEDDING_DIM);

@@ -213,6 +213,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 @media (display-mode: standalone) {
   button, nav, header, aside { -webkit-user-select: none; user-select: none; }
+  .message, .message-content, .message-content * { -webkit-user-select: text !important; user-select: text !important; }
 }
 
 @media (max-width: 768px) {

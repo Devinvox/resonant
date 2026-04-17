@@ -278,7 +278,7 @@ function handleCost(services: CommandServices): ServerMessage {
   const usage = services.agent.getContextUsage();
 
   const message = usage.tokensUsed > 0
-    ? `Tokens: ${usage.tokensUsed.toLocaleString()} / ${usage.contextWindow.toLocaleString()} (${Math.round((usage.tokensUsed / usage.contextWindow) * 100)}%)`
+    ? `Tokens: ${usage.tokensUsed.toLocaleString()} (Current Call) / ${usage.contextWindow.toLocaleString()} (${Math.round((usage.tokensUsed / usage.contextWindow) * 100)}%) | Total Session: ${usage.sessionTotalTokens.toLocaleString()}`
     : 'No active session — send a message first to start tracking';
 
   return {

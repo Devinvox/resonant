@@ -4,13 +4,14 @@
   import { send } from '$lib/stores/websocket.svelte';
   import { renderMarkdown } from '$lib/utils/markdown';
 
-  let { message, isStreaming = false, streamTokens = '', toolEvents = [], segments = null, companionName = 'Companion' } = $props<{
+  let { message, isStreaming = false, streamTokens = '', toolEvents = [], segments = null, companionName = 'Companion', onedit = null } = $props<{
     message: Message;
     isStreaming?: boolean;
     streamTokens?: string;
     toolEvents?: ToolEvent[];
     segments?: MessageSegment[] | null;
     companionName?: string;
+    onedit?: ((content: string) => void) | null;
   }>();
 
   // Format timestamp
@@ -256,6 +257,27 @@
     if (message.delivered_at) return 'delivered';
     return 'sent';
   });
+
+  function handleMarkdownClick(e: MouseEvent) {
+    const btn = (e.target as HTMLElement).closest('.copy-code-btn') as HTMLButtonElement;
+    if (btn) {
+      const container = btn.closest('.code-block-container') as HTMLElement;
+      const code = container?.dataset.code;
+      if (code) {
+        navigator.clipboard.writeText(decodeURIComponent(code));
+        const span = btn.querySelector('span');
+        if (span) {
+          const original = span.textContent;
+          span.textContent = 'Copied!';
+          btn.classList.add('copied');
+          setTimeout(() => {
+            span.textContent = original;
+            btn.classList.remove('copied');
+          }, 2000);
+        }
+      }
+    }
+  }
 </script>
 
 {#if message.role === 'system'}
@@ -274,6 +296,7 @@
       {#if message.edited_at && !isDeleted}
         <span class="edited">(edited)</span>
       {/if}
+
       {#if message.role === 'companion'}
         {#if hasSegments}
           <button
@@ -422,7 +445,7 @@
           {/if}
         </div>
       {:else}
-        <div class="markdown-content">
+        <div class="markdown-content" onclick={handleMarkdownClick}>
           {@html renderedContent()}
         </div>
         {#if isStreaming}
@@ -457,8 +480,24 @@
       </div>
     {/if}
 
-    {#if !isDeleted && groupedReactions().length > 0}
+    {#if !isDeleted}
       <div class="reactions-row">
+        <button
+          class="action-btn"
+          onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(message.content); }}
+          title="Copy"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        {#if message.role === 'user'}
+          <button
+            class="action-btn"
+            onclick={(e) => { e.stopPropagation(); onedit?.(message.content); }}
+            title="Edit"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+        {/if}
         {#if canReadAloud}
           <button
             class="read-aloud-btn"
@@ -493,55 +532,24 @@
         <div class="reaction-picker-wrapper">
           <button class="reaction-add" onclick={openReactionPicker} title="Add reaction">+</button>
           {#if pickerOpen}
-            <div class="reaction-quick-pick" bind:this={pickerEl}>
+            <div class="reaction-quick-pick" class:align-right={message.role === 'user'} bind:this={pickerEl}>
               {#each QUICK_EMOJIS as emoji}
                 <button class="quick-emoji" onclick={() => pickEmoji(emoji)}>{emoji}</button>
               {/each}
             </div>
           {/if}
         </div>
-      </div>
-    {:else if !isDeleted && !isStreaming}
-      <div class="reactions-row reactions-hover-only">
-        {#if canReadAloud}
-          <button
-            class="read-aloud-btn"
-            class:loading={ttsState === 'loading'}
-            class:playing={ttsState === 'playing'}
-            onclick={toggleReadAloud}
-            disabled={ttsState === 'loading'}
-            title={ttsState === 'playing' ? 'Stop' : ttsState === 'loading' ? 'Generating...' : 'Read aloud'}
-          >
-            {#if ttsState === 'loading'}
-              <svg class="tts-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="12"/></svg>
-            {:else if ttsState === 'playing'}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-            {:else}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
-            {/if}
-          </button>
-        {/if}
-        <div class="reaction-picker-wrapper">
-          <button class="reaction-add" onclick={openReactionPicker} title="Add reaction">+</button>
-          {#if pickerOpen}
-            <div class="reaction-quick-pick" bind:this={pickerEl}>
-              {#each QUICK_EMOJIS as emoji}
-                <button class="quick-emoji" onclick={() => pickEmoji(emoji)}>{emoji}</button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      </div>
-    {/if}
 
-    {#if readStatus() && message.role === 'user'}
-      <div class="read-status">
-        {#if readStatus() === 'read'}
-          <span class="check read" title="Read">&#10003;&#10003;</span>
-        {:else if readStatus() === 'delivered'}
-          <span class="check" title="Delivered">&#10003;&#10003;</span>
-        {:else}
-          <span class="check" title="Sent">&#10003;</span>
+        {#if readStatus() && message.role === 'user'}
+          <div class="read-status">
+            {#if readStatus() === 'read'}
+              <span class="check read" title="Read">&#10003;&#10003;</span>
+            {:else if readStatus() === 'delivered'}
+              <span class="check" title="Delivered">&#10003;&#10003;</span>
+            {:else}
+              <span class="check" title="Sent">&#10003;</span>
+            {/if}
+          </div>
         {/if}
       </div>
     {/if}
@@ -572,11 +580,20 @@
     position: relative;
     max-width: 100%;
     overflow-wrap: break-word;
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    -webkit-touch-callout: default !important;
+  }
+
+  :global(.message *) {
+    user-select: text !important;
+    -webkit-user-select: text !important;
   }
 
   .message.companion {
     align-self: flex-start;
-    width: 100%;
+    width: fit-content;
+    max-width: 95%;
     background: var(--companion-bg);
     border: 1px solid var(--border);
     border-radius: 1.125rem;
@@ -588,6 +605,7 @@
     align-self: flex-end;
     margin-left: auto;
     max-width: 85%;
+    width: fit-content;
     background: var(--user-bg);
     border: 1px solid var(--border);
     border-radius: 1.125rem;
@@ -619,6 +637,24 @@
     color: var(--text-muted);
     font-size: 0.75rem;
     font-style: italic;
+  }
+
+  .action-btn {
+    padding: 0.25rem;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition-fast);
+  }
+
+  .action-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .tools-toggle {
@@ -923,17 +959,28 @@
   .reactions-row {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 0.35rem;
     margin-top: 0.25rem;
+    width: 100%;
+  }
+
+  .message.user .reactions-row {
+    justify-content: flex-end;
   }
 
   .reactions-hover-only {
+    max-height: 0;
     opacity: 0;
-    transition: opacity 0.15s;
+    overflow: hidden;
+    margin-top: 0;
+    transition: max-height 0.15s, opacity 0.15s, margin-top 0.15s;
   }
 
   .message:hover .reactions-hover-only {
+    max-height: 2rem;
     opacity: 1;
+    margin-top: 0.25rem;
   }
 
   .reaction-chip {
@@ -999,7 +1046,7 @@
 
   .reaction-quick-pick {
     position: absolute;
-    bottom: calc(100% + 4px);
+    bottom: calc(100% + 8px);
     left: 50%;
     transform: translateX(-50%);
     display: flex;
@@ -1009,8 +1056,14 @@
     border: 1px solid var(--border);
     border-radius: 0.875rem;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    z-index: 10;
+    z-index: 1000;
     white-space: nowrap;
+  }
+
+  .reaction-quick-pick.align-right {
+    left: auto !important;
+    right: 0 !important;
+    transform: none !important;
   }
 
   .quick-emoji {
@@ -1033,8 +1086,9 @@
 
   .read-status {
     display: flex;
-    justify-content: flex-end;
-    margin-top: 0.05rem;
+    align-items: center;
+    margin-left: auto;
+    padding-left: 0.5rem;
   }
 
   .check {
@@ -1070,9 +1124,62 @@
   .markdown-content :global(pre) {
     background: var(--bg-tertiary);
     padding: 0.75rem;
-    border-radius: var(--radius-sm);
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
     overflow-x: auto;
-    margin: 0.5rem 0;
+    margin: 0;
+  }
+
+  /* Code block with copy button */
+  .markdown-content :global(.code-block-container) {
+    position: relative;
+    margin: 1rem 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: var(--bg-tertiary);
+  }
+
+  .markdown-content :global(.code-block-header) {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.35rem 0.75rem;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+  }
+
+  .markdown-content :global(.code-lang) {
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+
+  .markdown-content :global(.copy-code-btn) {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.5rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .markdown-content :global(.copy-code-btn:hover) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border-color: var(--border-hover);
+  }
+
+  .markdown-content :global(.copy-code-btn.copied) {
+    color: var(--success, #22c55e);
+    border-color: var(--success, #22c55e);
   }
 
   .markdown-content :global(pre code) {
@@ -1317,11 +1424,11 @@
     }
 
     .message {
-      overflow: hidden;
+      overflow: visible;
     }
 
     .message-content {
-      overflow: hidden;
+      overflow: visible;
     }
 
     .tool-output {
