@@ -156,10 +156,6 @@ app.post('/api/llm-proxy/*', async (req, res) => {
         console.log(`Last message content length: ${JSON.stringify(lastMsg.content).length} chars`);
       }
 
-      // Log full body to file for inspection
-      const fs = await import('fs');
-      const logFile = 'C:\\Users\\Nout\\AI\\resonant\\packages\\backend\\journals\\llm-proxy-log.jsonl';
-
       // TRUNCATION SAFETY VALVE: Protect LLM context from massive messages
       // Skip for count_tokens — it needs full content for accurate counting
       const isCountTokens = path.includes('count_tokens');
@@ -189,32 +185,12 @@ app.post('/api/llm-proxy/*', async (req, res) => {
 
       // Also guard system prompt just in case
       if (typeof body.system === 'string') {
-        if (body.system.length > 500) {
-          // DEBUG: DUMP SYSTEM PROMPT TO FILE FOR ANALYSIS
-          try {
-            fs.writeFileSync('C:\\Users\\Nout\\AI\\resonant\\debug_system_prompt.txt', typeof body.system === 'string' ? body.system : JSON.stringify(body.system, null, 2));
-            console.log(`[LLM Proxy] DUMPED SYSTEM PROMPT TO C:\\Users\\Nout\\AI\\resonant\\debug_system_prompt.txt (${body.system.length} chars)`);
-          } catch (e) {
-            console.error('Failed to dump system prompt:', e);
-          }
-        }
-
         if (body.system.length > 150000) {
           console.log(`[LLM Proxy] TRUNCATING massive system prompt (${body.system.length} -> 150000 chars)`);
           body.system = body.system.slice(0, 150000) + '... [TRUNCATED]';
         }
       }
 
-      const logEntry = {
-        timestamp: new Date().toISOString(),
-        model: targetModel,
-        body_size: Buffer.byteLength(JSON.stringify(body), 'utf8'),
-        message_count: body.messages?.length || 0,
-        body: body
-      };
-      fs.appendFileSync(logFile, JSON.stringify(logEntry) + '\n');
-
-      console.log(`Full request body logged to: ${logFile}`);
       console.log(`==========================================\n`);
 
       // Update body with the mapped/lowercased model name
